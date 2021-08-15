@@ -1,4 +1,4 @@
-(defproject remongo "0.1.0"
+(defproject org.clojars.davber/remongo "0.1.0"
   :description "ClojureScript library synchronizing Re-frame DB's and MongoDB via Realm"
   :url "http://example.com/FIXME"
   :license {:name "Unlicense"
