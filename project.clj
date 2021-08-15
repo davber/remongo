@@ -6,4 +6,4 @@
   :dependencies [[org.clojure/clojure "1.10.1"]
                  [org.clojure/core.async "1.3.618"]
                  [com.taoensso/timbre "5.1.2" :exclusions [io.aviso/pretty com.taoensso/encore]]]
-  :repl-options {:init-ns remongo.core})
+  :repl-options {:init-ns remongo.mongo})
