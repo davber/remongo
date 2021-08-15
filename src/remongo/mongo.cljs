@@ -5,8 +5,7 @@
     [cljs.core.async.interop :refer-macros [<p!]]
     [taoensso.timbre :as timbre]
     ["realm-web" :as realm]
-    [psf.web.utils :as utils]
-    [psf.sim.utils :refer [dissoc-in]]))
+    [remongo.utils :as utils :refer [dissoc-in]]))
 
 (def REALM-APP (atom nil))
 (def REALM-CRED (atom nil))
