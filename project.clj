@@ -1,6 +1,6 @@
 (defproject org.clojars.davber/remongo "0.1.1"
   :description "ClojureScript library synchronizing Re-frame DB's and MongoDB via Realm"
-  :url "http://example.com/FIXME"
+  :url "https://clojars.org/org.clojars.davber/remongo"
   :license {:name "Unlicense"
             :url "https://unlicense.org/"}
   :dependencies [[org.clojure/clojure "1.10.1"]
