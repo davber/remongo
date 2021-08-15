@@ -1,6 +1,7 @@
 (ns remongo.mongo
   "Wrapper and utilities for dealing with MongoDB, including in the context of Reframe"
   (:require
+    [clojure.set :as set]
     [cljs.core.async :as async :refer [go <!]]
     [cljs.core.async.interop :refer-macros [<p!]]
     [taoensso.timbre :as timbre]
@@ -11,6 +12,36 @@
 (def REALM-CRED (atom nil))
 (def REALM-MONGO-CLIENT (atom nil))
 
+;; The sync cache will map sync structure + layer index to a cache
+(def REALM-SYNC-CACHE (atom nil))
+
+(defn update-layer-cache
+  "Update sync cache specific for the given layer"
+  [sync-info layer-index data]
+  (swap! REALM-SYNC-CACHE update-in [sync-info layer-index] data))
+
+(defn get-layer-cache
+  "Get the layer cache"
+  [sync-info layer-index]
+  (get-in @REALM-SYNC-CACHE get-in [sync-info layer-index]))
+
+(defn extract-layer-diff
+  "Get the difference from the existing cache for a layer, as a three keyed structure, :insert, :update and :delete"
+  [sync-info layer-index data]
+  (let [old-data (get-layer-cache sync-info layer-index)
+        old-ids (set (map :_id old-data))
+        current-ids (set (map :_id data))
+        inserted-ids (set/difference current-ids old-ids)
+        deleted-ids (set/difference old-ids current-ids)
+        surviving-ids (set/intersection old-ids current-ids)
+        inserted-docs (filter (comp inserted-ids :_id) data)
+        deleted-docs (filter (comp deleted-ids :_id) data)
+        ;; We need to check which of the surviving documents that really changed
+        new-docs (filter (comp surviving-ids :_id) data)
+        old-docs (filter (comp surviving-ids :_id) old-data)
+        old-map (into {} (map (juxt :_id identity) old-docs))
+        updated-docs (remove (fn [doc] (= doc (old-map (:_id doc)))) new-docs)]
+    {:insert inserted-docs :delete deleted-docs :update updated-docs}))
 
 (defn ^realm/User current-user
   "The currently logged in user, if any"
@@ -112,9 +143,10 @@
 
 (defn <sync-save-layer
   "Use a sync layer to save extracts from Reframe DB to MongoDB, returning the updated Reframd DB"
-  [sync-info db-chan layer]
+  [sync-info db-chan layer-index]
   (go
-    (let [db (<! db-chan)
+    (let [layer (nth (:layers sync-info) layer-index)
+          db (<! db-chan)
           collection (:collection layer)
           db-name (or (:db layer) (:db sync-info))]
       (timbre/info "<sync-save-layer with layer" layer)
@@ -146,9 +178,11 @@
 
 (defn <sync-load-layer
   "Load data from MongoDB according to sync layer, adding on Reframe DB we get from channel"
-  [sync-info db-chan layer]
+  [sync-info db-chan layer-index]
+  (timbre/info "<sync-load-layer: layer index " layer-index)
   (go
-    (let [db (<! db-chan)
+    (let [layer (nth (:layers sync-info) layer-index)
+          db (<! db-chan)
           collection (:collection layer)
           db-name (or (:db layer) (:db sync-info))
           path (make-string (:path layer))
@@ -180,15 +214,14 @@
   "Save a Reframe DB to MongoDB intelligently, returning the fitered (often empty) Reframe DB"
   [db opts]
   (let [ch (async/chan)
-        layers (:layers opts)]
+        layer-indices (range (count (:layers opts)))]
     (async/put! ch db)
-    (reduce (partial <sync-save-layer opts) ch (reverse layers))))
+    (reduce (partial <sync-save-layer opts) ch (reverse layer-indices))))
 
 (defn <sync-load
   "Load a Reframe DB from MongoDB intelligently, returning the actual Reframe DB"
   [opts]
   (let [ch (async/chan)
-        layers (:layers opts)]
-    (timbre/info "<sync-load with layers" layers)
+        layer-indices (range (count (:layers opts)))]
     (async/put! ch {})
-    (reduce (partial <sync-load-layer opts) ch layers)))
+    (reduce (partial <sync-load-layer opts) ch layer-indices)))
