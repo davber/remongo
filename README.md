@@ -13,7 +13,7 @@ Include the Clojar in your project.
 
 ## License
 
-"Copyright" © 2021 David Bergman
+Copyright © 2021 David Bergman
 
 This program and the accompanying materials are made available under the
 terms of the Unlicense license.

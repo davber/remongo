@@ -1,5 +1,6 @@
 (ns remongo.utils
-  "Utilities for making Remongo work and interact with easier")
+  "Utilities for making Remongo work and interact with easier"
+  (:require [clojure.walk :as walk]))
 
 (defn dissoc-in
   "The function that should exist in the standard library, to dissoc deeply"
@@ -15,4 +16,14 @@
   [obj]
   (try (.stringify js/JSON obj)
        (catch js/Error _ obj)))
+
+(defn stringify-keyword
+  "Stringigy keywords but leave everything else"
+  [obj]
+  (if (keyword? obj) (name obj) obj))
+
+(defn stringify
+  "Stringify all keywords to strings in a structure, for JSON preparation"
+  [struct]
+  (walk/prewalk stringify-keyword struct))
 

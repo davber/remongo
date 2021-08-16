@@ -15,33 +15,51 @@
 ;; The sync cache will map sync structure + layer index to a cache
 (def REALM-SYNC-CACHE (atom nil))
 
+(defn clear-cache
+  "Clear all layer caches for given sync info"
+  [sync-info]
+  (swap! REALM-SYNC-CACHE dissoc sync-info))
+
 (defn update-layer-cache
   "Update sync cache specific for the given layer"
   [sync-info layer-index data]
-  (swap! REALM-SYNC-CACHE update-in [sync-info layer-index] data))
+  (swap! REALM-SYNC-CACHE assoc-in [sync-info layer-index] data))
 
 (defn get-layer-cache
   "Get the layer cache"
   [sync-info layer-index]
-  (get-in @REALM-SYNC-CACHE get-in [sync-info layer-index]))
+  (get-in @REALM-SYNC-CACHE [sync-info layer-index]))
 
 (defn extract-layer-diff
   "Get the difference from the existing cache for a layer, as a three keyed structure, :insert, :update and :delete"
-  [sync-info layer-index data]
-  (let [old-data (get-layer-cache sync-info layer-index)
-        old-ids (set (map :_id old-data))
-        current-ids (set (map :_id data))
+  [sync-info layer-index data-clj]
+  ;; We do handle documents without ID:s, by assuming they are new
+  ;; TODO: return the new documents with the proper ID's filled in, along with the reduced Reframe DB
+  (let [data (utils/stringify data-clj)
+        id-docs (filter #(get % "_id") data)
+        no-id-docs (remove #(get % "_id") data)
+        old-data (get-layer-cache sync-info layer-index)
+        old-ids (set (map #(get % "_id") old-data))
+        current-ids (set (map #(get % "_id") id-docs))
         inserted-ids (set/difference current-ids old-ids)
         deleted-ids (set/difference old-ids current-ids)
         surviving-ids (set/intersection old-ids current-ids)
-        inserted-docs (filter (comp inserted-ids :_id) data)
-        deleted-docs (filter (comp deleted-ids :_id) data)
+        inserted-docs (filter (comp inserted-ids #(get % "_id")) data)
+        ;; And we add all documents that don't already have an ID
+        inserted-docs' (concat inserted-docs no-id-docs)
+        deleted-docs (filter (comp deleted-ids #(get % "_id")) data)
         ;; We need to check which of the surviving documents that really changed
-        new-docs (filter (comp surviving-ids :_id) data)
-        old-docs (filter (comp surviving-ids :_id) old-data)
-        old-map (into {} (map (juxt :_id identity) old-docs))
-        updated-docs (remove (fn [doc] (= doc (old-map (:_id doc)))) new-docs)]
-    {:insert inserted-docs :delete deleted-docs :update updated-docs}))
+        new-docs (filter (comp surviving-ids #(get % "_id")) data)
+        old-docs (filter (comp surviving-ids #(get % "_id")) old-data)
+        old-map (into {} (map (juxt #(get % "_id") identity) old-docs))
+        updated-docs (remove (fn [doc] (= doc (old-map (#(get % "_id") doc)))) new-docs)
+        diff {:insert inserted-docs' :delete deleted-docs :update updated-docs}]
+    (timbre/info "old-ids = \n" old-ids)
+    (timbre/info "current-ids = \n" current-ids)
+    (timbre/info "inserted-ids = \n" inserted-ids)
+    (timbre/info "deleted-ids = \n" deleted-ids)
+    (timbre/info "extract-layer-diff of layer" layer-index "with diff:\n" diff)
+    diff))
 
 (defn ^realm/User current-user
   "The currently logged in user, if any"
@@ -113,6 +131,16 @@
         true)
       (-> (mongo-collection db-name coll-name) (.insertMany (clj->js docs)) (<p!) js->clj))))
 
+(defn <delete
+  "Delete one specific document"
+  [db-name coll-name doc]
+  (go (-> (mongo-collection db-name coll-name) (.delete (clj->js doc)) (<p!) (js->clj))))
+
+(defn <deleteSeq
+  "Helper to delete a sequence of documents, returning sequence of results"
+  [db-name coll-name docs]
+  (async/reduce cons nil (reverse (map (partial <delete db-name coll-name) docs))))
+
 (defn <deleteMany
   "Delete many documents from a MongoDB collection, given a condition, returning result in channel"
   [db-name coll-name condition]
@@ -129,6 +157,11 @@
                         (clj->js opts))
             (<p!) js->clj))))
 
+(defn <updateSeq
+  "Helper to update a sequence of documents"
+  [db-name coll-name docs & {:keys [upsert] :or {upsert true}}]
+  (async/reduce cons nil (reverse (map #(<updateOne db-name coll-name {:_id (:_id %)} % :upsert upsert) docs))))
+
 (defn <init
   "Initialize the Realm connection, returning a channel with either user or nil"
   [app-id app-variant]
@@ -142,30 +175,41 @@
       user)))
 
 (defn <sync-save-layer
-  "Use a sync layer to save extracts from Reframe DB to MongoDB, returning the updated Reframd DB"
+  "Use a sync layer to save extracts from Reframe DB to MongoDB, returning the updated Reframe DB"
   [sync-info db-chan layer-index]
   (go
     (let [layer (nth (:layers sync-info) layer-index)
+          path (utils/stringify (:path layer))
+          path-key (utils/stringify (:path-key layer))
           db (<! db-chan)
           collection (:collection layer)
           db-name (or (:db layer) (:db sync-info))]
-      (timbre/info "<sync-save-layer with layer" layer)
+      (timbre/info "<sync-save-layer with layer" layer "and path" path "and path-key" path-key)
       (case (:kind layer)
+        ;; TODO: we should check the global for actual changes, using our sync cache
         :single (let [_res (<! (<updateOne db-name collection (:keys layer) db))]
-                  (dissoc-in db (:path layer)))
-        :many (let [path-value (get-in db (:path layer))
-                    path-key (:path-key layer)
+                  (dissoc-in db path))
+        :many (let [path-value (get-in db path)
+                    path-key path-key
                     items (if path-key (vals path-value) path-value)
                     _ (timbre/info "Got" (count items) "items for collection" collection)
-                    ;; TODO: we are currently always deleting and reinserting these documents
-                    del-result (<! (<deleteMany db-name collection {}))
-                    _ (timbre/info "Deleting from DB" db-name "and collection" collection
-                                   "with result:" (js->clj del-result))
-                    ins-result (<! (<insertMany db-name collection items))
-                    _ (timbre/info "Inserting into DB" db-name "and collection" collection
-                                   "with result:" (js->clj ins-result))]
-                (timbre/info "Trying to dissoc" (:path layer) "from DB")
-                (dissoc-in db (:path layer)))
+                    ;; We just do the proper deletes, insertions and updates
+                    diff (extract-layer-diff sync-info layer-index items)
+                    insert-docs (:insert diff)
+                    ins-result (<! (<insertMany db-name collection insert-docs))
+                    _ (timbre/info "Inserted" (count insert-docs) "into" collection "with result"
+                                   (js->clj ins-result))
+                    delete-docs (:delete diff)
+                    del-results (<! (<deleteSeq db-name collection delete-docs))
+                    _ (timbre/info "Deleting" (count delete-docs) "from DB" db-name "and collection" collection
+                                   "with result:" (js->clj del-results))
+                    update-docs (:update diff)
+                    upd-results (<! (<updateSeq db-name collection items :upsert false))
+                    _ (timbre/info "Updated" (count update-docs) "into DB" db-name "and collection" collection
+                                   "with result:" (js->clj upd-results))]
+                ;; TODO: updating cache to fit what we have right now
+                (timbre/info "Trying to dissoc" path "from DB")
+                (dissoc-in db path))
         (do (timbre/error "Trying to save with invalid sync layer:" layer) db)))))
 
 (defn make-string
@@ -179,24 +223,25 @@
 (defn <sync-load-layer
   "Load data from MongoDB according to sync layer, adding on Reframe DB we get from channel"
   [sync-info db-chan layer-index]
-  (timbre/info "<sync-load-layer: layer index " layer-index)
   (go
     (let [layer (nth (:layers sync-info) layer-index)
           db (<! db-chan)
           collection (:collection layer)
           db-name (or (:db layer) (:db sync-info))
-          path (make-string (:path layer))
-          path-key (make-string (:path-key layer))
+          path (utils/stringify (:path layer))
+          path-key (utils/stringify (:path-key layer))
           _ (timbre/info "<sync-load-layer about to load layer" layer "with path" path)
           db'
           (case (:kind layer)
             :single (let [obj (<! (<findOne db-name collection (:keys layer)))
-                          db' (cond
-                                (false? obj) (do (timbre/warn "<sync-load-layer could not find any" collection)
-                                                 db)
-                                ;; If we have an empty path, we replace the whole Reframe DB
-                                (empty? path) obj
-                                :else (assoc-in db path obj))]
+                          [db' cache]
+                          (cond
+                            (false? obj) (do (timbre/warn "<sync-load-layer could not find any" collection)
+                                             [db []])
+                            ;; If we have an empty path, we replace the whole Reframe DB
+                            (empty? path) [obj [obj]]
+                            :else [(assoc-in db path obj) [obj]])]
+                      (update-layer-cache sync-info layer-index cache)
                       db')
             :many (let [items (<! (<find db-name collection {}))
                         _ (timbre/info "<sync-load-layer got" (count items) "items from collection" collection
@@ -206,6 +251,7 @@
                                                 items)
                         _ (timbre/info "Keys are " (when (map? path-value) (keys path-value)))
                         db' (assoc-in db path path-value)]
+                    (update-layer-cache sync-info layer-index items)
                     db')
             (do (timbre/error "Trying to load with invalid sync layer:" layer) db))]
       db')))
@@ -214,8 +260,9 @@
   "Save a Reframe DB to MongoDB intelligently, returning the fitered (often empty) Reframe DB"
   [db opts]
   (let [ch (async/chan)
-        layer-indices (range (count (:layers opts)))]
-    (async/put! ch db)
+        layer-indices (range (count (:layers opts)))
+        db' (utils/stringify db)]
+    (async/put! ch db')
     (reduce (partial <sync-save-layer opts) ch (reverse layer-indices))))
 
 (defn <sync-load
