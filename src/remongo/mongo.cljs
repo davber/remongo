@@ -47,7 +47,7 @@
         inserted-docs (filter (comp inserted-ids #(get % "_id")) data)
         ;; And we add all documents that don't already have an ID
         inserted-docs' (concat inserted-docs no-id-docs)
-        deleted-docs (filter (comp deleted-ids #(get % "_id")) data)
+        deleted-docs (filter (comp deleted-ids #(get % "_id")) old-data)
         ;; We need to check which of the surviving documents that really changed
         new-docs (filter (comp surviving-ids #(get % "_id")) data)
         old-docs (filter (comp surviving-ids #(get % "_id")) old-data)
