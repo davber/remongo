@@ -134,7 +134,7 @@
 (defn <delete
   "Delete one specific document"
   [db-name coll-name doc]
-  (go (-> (mongo-collection db-name coll-name) (.delete (clj->js doc)) (<p!) (js->clj))))
+  (go (-> (mongo-collection db-name coll-name) (.deleteOne (clj->js {"_id" (get doc "_id")})) (<p!) (js->clj))))
 
 (defn <deleteSeq
   "Helper to delete a sequence of documents, returning sequence of results"
