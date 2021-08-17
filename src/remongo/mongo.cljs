@@ -125,6 +125,7 @@
   "Insert many documents into a MongoDB collection, returning a channel of result"
   [db-name coll-name docs]
   (go
+    ;; Realm Web SDK doesn't deal with insertion of empty collections
     (if (empty? docs)
       (do
         (timbre/warn "Trying to insert empty sequence into collection" coll-name)
@@ -139,7 +140,10 @@
 (defn <deleteSeq
   "Helper to delete a sequence of documents, returning sequence of results"
   [db-name coll-name docs]
-  (async/reduce cons nil (reverse (map (partial <delete db-name coll-name) docs))))
+  (go
+    (let [ch (async/map identity (map (partial <delete db-name coll-name) docs))
+          coll (async/take (count docs) ch)]
+      coll)))
 
 (defn <deleteMany
   "Delete many documents from a MongoDB collection, given a condition, returning result in channel"
@@ -160,7 +164,10 @@
 (defn <updateSeq
   "Helper to update a sequence of documents"
   [db-name coll-name docs & {:keys [upsert] :or {upsert true}}]
-  (async/reduce cons nil (reverse (map #(<updateOne db-name coll-name {:_id (:_id %)} % :upsert upsert) docs))))
+  (go
+    (let [ch (async/map identity (map #(<updateOne db-name coll-name {:_id (:_id %)} % :upsert upsert) docs))
+          coll (async/take (count docs) ch)]
+      coll)))
 
 (defn <init
   "Initialize the Realm connection, returning a channel with either user or nil"
@@ -200,6 +207,7 @@
                     _ (timbre/info "Inserted" (count insert-docs) "into" collection "with result"
                                    (js->clj ins-result))
                     delete-docs (:delete diff)
+                    _ (timbre/info "Trying to delete...")
                     del-results (<! (<deleteSeq db-name collection delete-docs))
                     _ (timbre/info "Deleting" (count delete-docs) "from DB" db-name "and collection" collection
                                    "with result:" (js->clj del-results))
