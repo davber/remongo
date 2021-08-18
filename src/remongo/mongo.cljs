@@ -182,20 +182,21 @@
       user)))
 
 (defn <sync-save-layer
-  "Use a sync layer to save extracts from Reframe DB to MongoDB, returning the updated Reframe DB"
+  "Use a sync layer to save extracts from Reframe DB to MongoDB, returning the reduced Reframe DB as well as the enhanced Reframe DB"
   [sync-info db-chan layer-index]
   (go
     (let [layer (nth (:layers sync-info) layer-index)
           path (utils/stringify (:path layer))
           path-key (utils/stringify (:path-key layer))
-          db (<! db-chan)
+          [db enhanced-db] (<! db-chan)
           collection (:collection layer)
           db-name (or (:db layer) (:db sync-info))]
+      ;; TODO: actually enhance the DB rather than just passing the same one around...
       (timbre/info "<sync-save-layer with layer" layer "and path" path "and path-key" path-key)
       (case (:kind layer)
         ;; TODO: we should check the global for actual changes, using our sync cache
         :single (let [_res (<! (<updateOne db-name collection (:keys layer) db))]
-                  (dissoc-in db path))
+                  [(dissoc-in db path) enhanced-db])
         :many (let [path-value (get-in db path)
                     path-key path-key
                     items (if path-key (vals path-value) path-value)
@@ -217,8 +218,9 @@
                                    "with result:" (js->clj upd-results))]
                 ;; TODO: updating cache to fit what we have right now
                 (timbre/info "Trying to dissoc" path "from DB")
-                (dissoc-in db path))
-        (do (timbre/error "Trying to save with invalid sync layer:" layer) db)))))
+                [(dissoc-in db path) enhanced-db])
+        (do (timbre/error "Trying to save with invalid sync layer:" layer)
+            [db enhanced-db])))))
 
 (defn make-string
   "Turn a single keyword into a string and a sequence of keywords into strings"
@@ -265,12 +267,13 @@
       db')))
 
 (defn <sync-save
-  "Save a Reframe DB to MongoDB intelligently, returning the fitered (often empty) Reframe DB"
+  "Save a Reframe DB to MongoDB intelligently, returning the filtered (often empty) Reframe DB along with the enhanced DB"
   [db opts]
   (let [ch (async/chan)
         layer-indices (range (count (:layers opts)))
         db' (utils/stringify db)]
-    (async/put! ch db')
+    ;; We push both the DB to be reduced and to be enchaned to the channel
+    (async/put! ch [db' db'])
     (reduce (partial <sync-save-layer opts) ch (reverse layer-indices))))
 
 (defn <sync-load
