@@ -2,6 +2,7 @@
   "Wrapper and utilities for dealing with MongoDB, including in the context of Reframe"
   (:require
     [clojure.set :as set]
+    [clojure.string :as string]
     [cljs.core.async :as async :refer [go <!]]
     [cljs.core.async.interop :refer-macros [<p!]]
     [taoensso.timbre :as timbre]
@@ -183,7 +184,7 @@
 
 (defn <sync-save-layer
   "Use a sync layer to save extracts from Reframe DB to MongoDB, returning the reduced Reframe DB as well as the enhanced Reframe DB"
-  [sync-info db-chan layer-index]
+  [sync-info db-chan layer-index & {:keys [dry-run] :or {dry-run false}}]
   (go
     (let [layer (nth (:layers sync-info) layer-index)
           path (utils/stringify (:path layer))
@@ -195,8 +196,9 @@
       (timbre/info "<sync-save-layer with layer" layer "and path" path "and path-key" path-key)
       (case (:kind layer)
         ;; TODO: we should check the global for actual changes, using our sync cache
-        :single (let [_res (<! (<updateOne db-name collection (:keys layer) db))]
-                  [(dissoc-in db path) enhanced-db])
+        :single (let [_res (when-not dry-run (<! (<updateOne db-name collection (:keys layer) db)))]
+                  [(if dry-run db (dissoc-in db path))
+                   (if dry-run db enhanced-db)])
         :many (let [path-value (get-in db path)
                     path-key path-key
                     items (if path-key (vals path-value) path-value)
@@ -204,21 +206,22 @@
                     ;; We just do the proper deletes, insertions and updates
                     diff (extract-layer-diff sync-info layer-index items)
                     insert-docs (:insert diff)
-                    ins-result (<! (<insertMany db-name collection insert-docs))
+                    ins-result (when-not dry-run (<! (<insertMany db-name collection insert-docs)))
                     _ (timbre/info "Inserted" (count insert-docs) "into" collection "with result"
                                    (js->clj ins-result))
                     delete-docs (:delete diff)
                     _ (timbre/info "Trying to delete...")
-                    del-results (<! (<deleteSeq db-name collection delete-docs))
+                    del-results (when-not dry-run (<! (<deleteSeq db-name collection delete-docs)))
                     _ (timbre/info "Deleting" (count delete-docs) "from DB" db-name "and collection" collection
                                    "with result:" (js->clj del-results))
                     update-docs (:update diff)
-                    upd-results (<! (<updateSeq db-name collection items :upsert false))
+                    upd-results (when-not dry-run (<! (<updateSeq db-name collection items :upsert false)))
                     _ (timbre/info "Updated" (count update-docs) "into DB" db-name "and collection" collection
                                    "with result:" (js->clj upd-results))]
                 ;; TODO: updating cache to fit what we have right now
                 (timbre/info "Trying to dissoc" path "from DB")
-                [(dissoc-in db path) enhanced-db])
+                [(if dry-run db (dissoc-in db path))
+                 (if dry-run db enhanced-db)])
         (do (timbre/error "Trying to save with invalid sync layer:" layer)
             [db enhanced-db])))))
 
@@ -268,13 +271,13 @@
 
 (defn <sync-save
   "Save a Reframe DB to MongoDB intelligently, returning the filtered (often empty) Reframe DB along with the enhanced DB"
-  [db opts]
+  [db opts & {:keys [dry-run] :or {dry-run false}}]
   (let [ch (async/chan)
         layer-indices (range (count (:layers opts)))
         db' (utils/stringify db)]
     ;; We push both the DB to be reduced and to be enchaned to the channel
     (async/put! ch [db' db'])
-    (reduce (partial <sync-save-layer opts) ch (reverse layer-indices))))
+    (reduce #(<sync-save-layer opts %1 %2 :dry-run dry-run) ch (reverse layer-indices))))
 
 (defn <sync-load
   "Load a Reframe DB from MongoDB intelligently, returning the actual Reframe DB"
@@ -283,3 +286,22 @@
         layer-indices (range (count (:layers opts)))]
     (async/put! ch {})
     (reduce (partial <sync-load-layer opts) ch layer-indices)))
+
+(defn path-function
+  "Get the function or structure with nested functions/structures from a path and root structure"
+  [path root]
+  (if (empty? path) root (recur (rest path) (aget root (first path)))))
+
+(defn <call-function
+  "Call serverless function"
+  [fun-path-str & args]
+  (go
+    (let [fun-path (cons "functions" (string/split fun-path-str #"/"))
+          _ (timbre/debug "fun-path is " fun-path)
+          ^realm/App app @REALM-APP
+          user (current-user)
+          fun (path-function fun-path user)
+          _ (timbre/debug "fun is " fun)
+          promise (apply fun args)
+          ret (<p! promise)]
+         ret)))
