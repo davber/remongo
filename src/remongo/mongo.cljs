@@ -31,29 +31,40 @@
   [sync-info layer-index]
   (get-in @REALM-SYNC-CACHE [sync-info layer-index]))
 
+(defn get-id
+  "Get ID of the document, if any, as a string"
+  [doc]
+  (when-let [id-obj (some (partial get doc) ["_id" "id" :_id :id])]
+    (str id-obj)))
+
+(defn remove-id
+  "Remove ID from the document"
+  [doc]
+  (dissoc doc :_id :id "_id" "id"))
+
 (defn extract-layer-diff
   "Get the difference from the existing cache for a layer, as a three keyed structure, :insert, :update and :delete"
   [sync-info layer-index data-clj]
   ;; We do handle documents without ID:s, by assuming they are new
   ;; TODO: return the new documents with the proper ID's filled in, along with the reduced Reframe DB
   (let [data (utils/stringify data-clj)
-        id-docs (filter #(get % "_id") data)
-        no-id-docs (remove #(get % "_id") data)
+        id-docs (filter get-id data)
+        no-id-docs (remove get-id data)
         old-data (get-layer-cache sync-info layer-index)
-        old-ids (set (map #(get % "_id") old-data))
-        current-ids (set (map #(get % "_id") id-docs))
+        old-ids (set (map get-id old-data))
+        current-ids (set (map get-id id-docs))
         inserted-ids (set/difference current-ids old-ids)
         deleted-ids (set/difference old-ids current-ids)
         surviving-ids (set/intersection old-ids current-ids)
-        inserted-docs (filter (comp inserted-ids #(get % "_id")) data)
+        inserted-docs (filter (comp inserted-ids get-id) data)
         ;; And we add all documents that don't already have an ID
         inserted-docs' (concat inserted-docs no-id-docs)
-        deleted-docs (filter (comp deleted-ids #(get % "_id")) old-data)
+        deleted-docs (filter (comp deleted-ids get-id) old-data)
         ;; We need to check which of the surviving documents that really changed
-        new-docs (filter (comp surviving-ids #(get % "_id")) data)
-        old-docs (filter (comp surviving-ids #(get % "_id")) old-data)
-        old-map (into {} (map (juxt #(get % "_id") identity) old-docs))
-        updated-docs (remove (fn [doc] (= doc (old-map (#(get % "_id") doc)))) new-docs)
+        new-docs (filter (comp surviving-ids get-id) data)
+        old-docs (filter (comp surviving-ids get-id) old-data)
+        old-map (into {} (map (juxt get-id identity) old-docs))
+        updated-docs (remove (fn [doc] (= (remove-id doc) (remove-id (old-map (get-id doc))))) new-docs)
         diff {:insert inserted-docs' :delete deleted-docs :update updated-docs}]
     (timbre/info "old-ids = \n" old-ids)
     (timbre/info "current-ids = \n" current-ids)
