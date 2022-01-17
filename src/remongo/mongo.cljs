@@ -64,12 +64,14 @@
         new-docs (filter (comp surviving-ids get-id) data)
         old-docs (filter (comp surviving-ids get-id) old-data)
         old-map (into {} (map (juxt get-id identity) old-docs))
-        updated-docs (remove (fn [doc] (= (remove-id doc) (remove-id (old-map (get-id doc))))) new-docs)
+        updated-docs (remove (fn [doc] (let [old-doc (old-map (get-id doc))] (= (remove-id doc) (remove-id old-doc)))) new-docs)
+        updated-ids (map get-id updated-docs)
         diff {:insert inserted-docs' :delete deleted-docs :update updated-docs}]
     (timbre/info "old-ids = \n" old-ids)
     (timbre/info "current-ids = \n" current-ids)
     (timbre/info "inserted-ids = \n" inserted-ids)
     (timbre/info "deleted-ids = \n" deleted-ids)
+    (timbre/info "updated-ids = \n" updated-ids)
     (timbre/info "extract-layer-diff of layer" layer-index "with diff:\n" diff)
     diff))
 
