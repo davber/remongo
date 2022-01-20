@@ -51,7 +51,8 @@
         id-docs (filter get-id data)
         no-id-docs (remove get-id data)
         old-data (get-layer-cache sync-info layer-index)
-        old-ids (set (map get-id old-data))
+        old-ids-objects (into {} (map (fn [doc] [(get-id doc) (get doc "_id")]) old-data))
+        old-ids (set (keys old-ids-objects))
         current-ids (set (map get-id id-docs))
         inserted-ids (set/difference current-ids old-ids)
         deleted-ids (set/difference old-ids current-ids)
@@ -65,8 +66,9 @@
         old-docs (filter (comp surviving-ids get-id) old-data)
         old-map (into {} (map (juxt get-id identity) old-docs))
         updated-docs (remove (fn [doc] (let [old-doc (old-map (get-id doc))] (= (remove-id doc) (remove-id old-doc)))) new-docs)
+        updated-docs' (map #(update % "_id" old-ids-objects) updated-docs)
         updated-ids (map get-id updated-docs)
-        diff {:insert inserted-docs' :delete deleted-docs :update updated-docs}]
+        diff {:insert inserted-docs' :delete deleted-docs :update updated-docs'}]
     (timbre/info "old-ids = \n" old-ids)
     (timbre/info "current-ids = \n" current-ids)
     (timbre/info "inserted-ids = \n" inserted-ids)
@@ -167,8 +169,12 @@
 (defn <updateOne
   "Update one document in a MongoDB collection, given condition and options, returning result in channel"
   [db-name coll-name condition doc & {:keys [upsert] :or {upsert true}}]
-  (let [opts {:upsert upsert}
-        props  {:$set (clj->js doc)}]
+  ;; NOTE: we remove the _id from the actual object, even if it did exist before
+  ;; TODO: we should really only do this if the condition involves the ID
+  (let [doc' (dissoc doc "_id")
+        _ (timbre/debug "updating: [upsert =" upsert "] " doc')
+        opts {:upsert upsert}
+        props  {:$set (clj->js doc')}]
     (go (-> (mongo-collection db-name coll-name)
             (.updateOne (clj->js condition)
                         (clj->js props)
@@ -179,7 +185,7 @@
   "Helper to update a sequence of documents"
   [db-name coll-name docs & {:keys [upsert] :or {upsert true}}]
   (go
-    (let [ch (async/map identity (map #(<updateOne db-name coll-name {:_id (:_id %)} % :upsert upsert) docs))
+    (let [ch (async/map identity (map #(<updateOne db-name coll-name {:_id (get % "_id")} % :upsert upsert) docs))
           coll (async/take (count docs) ch)]
       coll)))
 
@@ -228,7 +234,8 @@
                     _ (timbre/info "Deleting" (count delete-docs) "from DB" db-name "and collection" collection
                                    "with result:" (js->clj del-results))
                     update-docs (:update diff)
-                    upd-results (when-not dry-run (<! (<updateSeq db-name collection items :upsert false)))
+                    ;; TODO: we use upsert, which should not be used here, since these should all exist
+                    upd-results (when-not dry-run (<! (<updateSeq db-name collection update-docs :upsert true)))
                     _ (timbre/info "Updated" (count update-docs) "into DB" db-name "and collection" collection
                                    "with result:" (js->clj upd-results))]
                 ;; TODO: updating cache to fit what we have right now
