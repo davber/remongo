@@ -226,17 +226,17 @@
                     diff (extract-layer-diff sync-info layer-index items)
                     insert-docs (:insert diff)
                     ins-result (when-not dry-run (<! (<insertMany db-name collection insert-docs)))
-                    _ (timbre/info "Inserted" (count insert-docs) "into" collection "with result"
-                                   (js->clj ins-result))
+                    _ (timbre/info "Inserted" (count insert-docs) "with DB" db-name "and collection" collection
+                                   "with result"  (js->clj ins-result))
+                    _ (timbre/info "Inserted with docs " insert-docs)
                     delete-docs (:delete diff)
                     _ (timbre/info "Trying to delete...")
                     del-results (when-not dry-run (<! (<deleteSeq db-name collection delete-docs)))
-                    _ (timbre/info "Deleting" (count delete-docs) "from DB" db-name "and collection" collection
+                    _ (timbre/info "Deleting" (count delete-docs) "with DB" db-name "and collection" collection
                                    "with result:" (js->clj del-results))
                     update-docs (:update diff)
-                    ;; TODO: we use upsert, which should not be used here, since these should all exist
-                    upd-results (when-not dry-run (<! (<updateSeq db-name collection update-docs :upsert true)))
-                    _ (timbre/info "Updated" (count update-docs) "into DB" db-name "and collection" collection
+                    upd-results (when-not dry-run (<! (<updateSeq db-name collection update-docs :upsert false)))
+                    _ (timbre/info "Updated" (count update-docs) "with DB" db-name "and collection" collection
                                    "with result:" (js->clj upd-results))]
                 ;; TODO: updating cache to fit what we have right now
                 (timbre/info "Trying to dissoc" path "from DB")
