@@ -50,6 +50,9 @@
   (let [data (utils/stringify data-clj)
         id-docs (filter get-id data)
         no-id-docs (remove get-id data)
+        _ (when (not-empty no-id-docs) (timbre/debug "no-id-docs with string data keys " (map #(get % "_id") data)))
+        _ (when (not-empty no-id-docs) (timbre/debug "no-id-docs with layer-index " layer-index))
+        _ (when (not-empty no-id-docs) (timbre/debug "no-id-docs are " no-id-docs))
         old-data (get-layer-cache sync-info layer-index)
         old-ids-objects (into {} (map (fn [doc] [(get-id doc) (get doc "_id")]) old-data))
         old-ids (set (keys old-ids-objects))
@@ -127,15 +130,17 @@
 
 (defn <findOne
   "Find one MongoDB document, returning a channel to the result, with false being the value if not found"
-  [db-name coll-name condition]
+  [db-name coll-name condition & {:keys [fields] :or {fields {}}}]
   ;; NOTE: we need to handle falsey values, and make sure it is indeed false, since
   ;; we can't put nil onto channels
-  (go (-> (mongo-collection db-name coll-name) (.findOne (clj->js condition)) (<p!) js->clj make-false)))
+  (go (-> (mongo-collection db-name coll-name) (.findOne (clj->js (or condition {}))
+                                                         (clj->js (or fields {}))) (<p!) js->clj make-false)))
 
 (defn <find
   "Find many MongoDB documents for given collection name and condition, returning a channel holding sequence"
-  [db-name coll-name condition]
-  (go (-> (mongo-collection db-name coll-name) (.find (clj->js condition)) (<p!) js->clj)))
+  [db-name coll-name condition & {:keys [fields] :or {fields {}}}]
+  (go (-> (mongo-collection db-name coll-name) (.find (clj->js (or condition {}))
+                                                      (clj->js (or fields {}))) (<p!) js->clj make-false)))
 
 (defn <insertMany
   "Insert many documents into a MongoDB collection, returning a channel of result"
@@ -172,7 +177,6 @@
   ;; NOTE: we remove the _id from the actual object, even if it did exist before
   ;; TODO: we should really only do this if the condition involves the ID
   (let [doc' (dissoc doc "_id")
-        _ (timbre/debug "updating: [upsert =" upsert "] " doc')
         opts {:upsert upsert}
         props  {:$set (clj->js doc')}]
     (go (-> (mongo-collection db-name coll-name)
@@ -228,7 +232,6 @@
                     ins-result (when-not dry-run (<! (<insertMany db-name collection insert-docs)))
                     _ (timbre/info "Inserted" (count insert-docs) "with DB" db-name "and collection" collection
                                    "with result"  (js->clj ins-result))
-                    _ (timbre/info "Inserted with docs " insert-docs)
                     delete-docs (:delete diff)
                     _ (timbre/info "Trying to delete...")
                     del-results (when-not dry-run (<! (<deleteSeq db-name collection delete-docs)))
@@ -266,7 +269,7 @@
           _ (timbre/info "<sync-load-layer about to load layer" layer "with path" path)
           db'
           (case (:kind layer)
-            :single (let [obj (<! (<findOne db-name collection (:keys layer)))
+            :single (let [obj (<! (<findOne db-name collection (:keys layer) :fields (:fields layer)))
                           [db' cache]
                           (cond
                             (false? obj) (do (timbre/warn "<sync-load-layer could not find any" collection)
@@ -276,7 +279,7 @@
                             :else [(assoc-in db path obj) [obj]])]
                       (update-layer-cache sync-info layer-index cache)
                       db')
-            :many (let [items (<! (<find db-name collection {}))
+            :many (let [items (<! (<find db-name collection (:keys layer) :fields (:fields layer)))
                         _ (timbre/info "<sync-load-layer got" (count items) "items from collection" collection
                                        "using path key" path-key "and path" path)
                         ;; We have to fit the items into the Reframe DB, either as is, or as a map
