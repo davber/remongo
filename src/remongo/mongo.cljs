@@ -216,7 +216,9 @@
               path-key (utils/stringify (:path-key layer))
               [db enhanced-db] (<! db-chan)
               collection (:collection layer)
-              db-name (or (:db layer) (:db sync-info))]
+              ;; We first try with the the layer config, then the sync info as a whole, looking at db-save first
+              db-name (or (:db-save layer) (:db layer)
+                          (:db-save sync-info) (:db sync-info))]
           ;; TODO: actually enhance the DB rather than just passing the same one around...
           (timbre/info "<sync-save-layer with layer" layer "and path" path "and path-key" path-key)
           (case (:kind layer)
