@@ -264,41 +264,42 @@
 (defn <sync-load-layer
   "Load data from MongoDB according to sync layer, adding on Reframe DB we get from channel"
   [sync-info db-chan layer-index]
-  ;; We support nil layers, which are simply discarded
-  (if-let [layer (nth (:layers sync-info) layer-index)]
-    (go
-      (let [db (<! db-chan)
-            collection (:collection layer)
-            db-name (or (:db layer) (:db sync-info))
-            path (utils/stringify (:path layer))
-            path-key (utils/stringify (:path-key layer))
-            _ (timbre/info "<sync-load-layer about to load layer" layer "with path" path)
-            db'
-            (case (:kind layer)
-              :single (let [obj (<! (<findOne db-name collection (:keys layer) :fields (:fields layer)))
-                            [db' cache]
-                            (cond
-                              (false? obj) (do (timbre/warn "<sync-load-layer could not find any" collection)
-                                               [db []])
-                              ;; If we have an empty path, we replace the whole Reframe DB
-                              (empty? path) [obj [obj]]
-                              :else [(assoc-in db path obj) [obj]])]
-                        (update-layer-cache sync-info layer-index cache)
+  ;; We support nil layers, which are simply discarded, as are layers where :load is false
+  (let [layer (nth (:layers sync-info) layer-index)]
+    (if (:load layer)
+      (go
+        (let [db (<! db-chan)
+              collection (:collection layer)
+              db-name (or (:db layer) (:db sync-info))
+              path (utils/stringify (:path layer))
+              path-key (utils/stringify (:path-key layer))
+              _ (timbre/info "<sync-load-layer about to load layer" layer "with path" path)
+              db'
+              (case (:kind layer)
+                :single (let [obj (<! (<findOne db-name collection (:keys layer) :fields (:fields layer)))
+                              [db' cache]
+                              (cond
+                                (false? obj) (do (timbre/warn "<sync-load-layer could not find any" collection)
+                                                 [db []])
+                                ;; If we have an empty path, we replace the whole Reframe DB
+                                (empty? path) [obj [obj]]
+                                :else [(assoc-in db path obj) [obj]])]
+                          (update-layer-cache sync-info layer-index cache)
+                          db')
+                :many (let [items (<! (<find db-name collection (:keys layer) :fields (:fields layer)))
+                            _ (timbre/info "<sync-load-layer got" (count items) "items from collection" collection
+                                           "using path key" path-key "and path" path)
+                            ;; We have to fit the items into the Reframe DB, either as is, or as a map
+                            path-value (if path-key (into {} (map (fn [item] [(get item path-key) item]) items))
+                                                    items)
+                            _ (timbre/info "Keys are " (when (map? path-value) (keys path-value)))
+                            db' (assoc-in db path path-value)]
+                        (update-layer-cache sync-info layer-index items)
                         db')
-              :many (let [items (<! (<find db-name collection (:keys layer) :fields (:fields layer)))
-                          _ (timbre/info "<sync-load-layer got" (count items) "items from collection" collection
-                                         "using path key" path-key "and path" path)
-                          ;; We have to fit the items into the Reframe DB, either as is, or as a map
-                          path-value (if path-key (into {} (map (fn [item] [(get item path-key) item]) items))
-                                                  items)
-                          _ (timbre/info "Keys are " (when (map? path-value) (keys path-value)))
-                          db' (assoc-in db path path-value)]
-                      (update-layer-cache sync-info layer-index items)
-                      db')
-              (do (timbre/error "Trying to load with invalid sync layer:" layer) db))]
-        db'))
+                (do (timbre/error "Trying to load with invalid sync layer:" layer) db))]
+          db'))
     ;; We didn't have a proper layer, so just propagate the DB channel as is
-    db-chan))
+    db-chan)))
 
 (defn <sync-save
   "Save a Reframe DB to MongoDB intelligently, returning the filtered (often empty) Reframe DB along with the enhanced DB"
