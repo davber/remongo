@@ -234,7 +234,9 @@
                         ;; We just do the proper deletes, insertions and updates
                         diff (extract-layer-diff sync-info layer-index items)
                         insert-docs (:insert diff)
-                        ins-result (when-not dry-run (<! (<insertMany db-name collection insert-docs)))
+                        ;; NOTE: we use updates with upsert being true, so we deal properly with things looking new
+                        ;; but actuall being old
+                        ins-result (when-not dry-run (<! (<updateSeq db-name collection insert-docs :upsert true)))
                         _ (timbre/info "Inserted" (count insert-docs) "with DB" db-name "and collection" collection
                                        "with result"  (js->clj ins-result))
                         delete-docs (:delete diff)
