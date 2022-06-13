@@ -210,7 +210,8 @@
   [sync-info db-chan layer-index & {:keys [dry-run] :or {dry-run false}}]
   ;; We handle both nil layers and those that should not be saved naively
   (let [layer (nth (:layers sync-info) layer-index)]
-    (if (:save layer)
+    (if (:skip-save layer)
+      db-chan
       (go
         (let [path (utils/stringify (:path layer))
               path-key (utils/stringify (:path-key layer))
@@ -250,8 +251,7 @@
                     [(if dry-run db (dissoc-in db path))
                      (if dry-run db enhanced-db)])
             (do (timbre/error "Trying to save with invalid sync layer:" layer)
-                [db enhanced-db]))))
-      db-chan)))
+                [db enhanced-db])))))))
 
 (defn make-string
   "Turn a single keyword into a string and a sequence of keywords into strings"
@@ -266,7 +266,8 @@
   [sync-info db-chan layer-index]
   ;; We support nil layers, which are simply discarded, as are layers where :load is false
   (let [layer (nth (:layers sync-info) layer-index)]
-    (if (:load layer)
+    (if (:skip-load layer)
+      db-chan
       (go
         (let [db (<! db-chan)
               collection (:collection layer)
@@ -297,9 +298,7 @@
                         (update-layer-cache sync-info layer-index items)
                         db')
                 (do (timbre/error "Trying to load with invalid sync layer:" layer) db))]
-          db'))
-    ;; We didn't have a proper layer, so just propagate the DB channel as is
-    db-chan)))
+          db')))))
 
 (defn <sync-save
   "Save a Reframe DB to MongoDB intelligently, returning the filtered (often empty) Reframe DB along with the enhanced DB"
