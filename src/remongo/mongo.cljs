@@ -208,45 +208,48 @@
 (defn <sync-save-layer
   "Use a sync layer to save extracts from Reframe DB to MongoDB, returning the reduced Reframe DB as well as the enhanced Reframe DB"
   [sync-info db-chan layer-index & {:keys [dry-run] :or {dry-run false}}]
-  (go
-    (let [layer (nth (:layers sync-info) layer-index)
-          path (utils/stringify (:path layer))
-          path-key (utils/stringify (:path-key layer))
-          [db enhanced-db] (<! db-chan)
-          collection (:collection layer)
-          db-name (or (:db layer) (:db sync-info))]
-      ;; TODO: actually enhance the DB rather than just passing the same one around...
-      (timbre/info "<sync-save-layer with layer" layer "and path" path "and path-key" path-key)
-      (case (:kind layer)
-        ;; TODO: we should check the global for actual changes, using our sync cache
-        :single (let [_res (when-not dry-run (<! (<updateOne db-name collection (:keys layer) db)))]
-                  [(if dry-run db (dissoc-in db path))
-                   (if dry-run db enhanced-db)])
-        :many (let [path-value (get-in db path)
-                    path-key path-key
-                    items (if path-key (vals path-value) path-value)
-                    _ (timbre/info "Got" (count items) "items for collection" collection)
-                    ;; We just do the proper deletes, insertions and updates
-                    diff (extract-layer-diff sync-info layer-index items)
-                    insert-docs (:insert diff)
-                    ins-result (when-not dry-run (<! (<insertMany db-name collection insert-docs)))
-                    _ (timbre/info "Inserted" (count insert-docs) "with DB" db-name "and collection" collection
-                                   "with result"  (js->clj ins-result))
-                    delete-docs (:delete diff)
-                    _ (timbre/info "Trying to delete...")
-                    del-results (when-not dry-run (<! (<deleteSeq db-name collection delete-docs)))
-                    _ (timbre/info "Deleting" (count delete-docs) "with DB" db-name "and collection" collection
-                                   "with result:" (js->clj del-results))
-                    update-docs (:update diff)
-                    upd-results (when-not dry-run (<! (<updateSeq db-name collection update-docs :upsert false)))
-                    _ (timbre/info "Updated" (count update-docs) "with DB" db-name "and collection" collection
-                                   "with result:" (js->clj upd-results))]
-                ;; TODO: updating cache to fit what we have right now
-                (timbre/info "Trying to dissoc" path "from DB")
-                [(if dry-run db (dissoc-in db path))
-                 (if dry-run db enhanced-db)])
-        (do (timbre/error "Trying to save with invalid sync layer:" layer)
-            [db enhanced-db])))))
+  ;; We handle both nil layers and those that should not be saved naively
+  (let [layer (nth (:layers sync-info) layer-index)]
+    (if (:save layer)
+      (go
+        (let [path (utils/stringify (:path layer))
+              path-key (utils/stringify (:path-key layer))
+              [db enhanced-db] (<! db-chan)
+              collection (:collection layer)
+              db-name (or (:db layer) (:db sync-info))]
+          ;; TODO: actually enhance the DB rather than just passing the same one around...
+          (timbre/info "<sync-save-layer with layer" layer "and path" path "and path-key" path-key)
+          (case (:kind layer)
+            ;; TODO: we should check the global for actual changes, using our sync cache
+            :single (let [_res (when-not dry-run (<! (<updateOne db-name collection (:keys layer) db)))]
+                      [(if dry-run db (dissoc-in db path))
+                       (if dry-run db enhanced-db)])
+            :many (let [path-value (get-in db path)
+                        path-key path-key
+                        items (if path-key (vals path-value) path-value)
+                        _ (timbre/info "Got" (count items) "items for collection" collection)
+                        ;; We just do the proper deletes, insertions and updates
+                        diff (extract-layer-diff sync-info layer-index items)
+                        insert-docs (:insert diff)
+                        ins-result (when-not dry-run (<! (<insertMany db-name collection insert-docs)))
+                        _ (timbre/info "Inserted" (count insert-docs) "with DB" db-name "and collection" collection
+                                       "with result"  (js->clj ins-result))
+                        delete-docs (:delete diff)
+                        _ (timbre/info "Trying to delete...")
+                        del-results (when-not dry-run (<! (<deleteSeq db-name collection delete-docs)))
+                        _ (timbre/info "Deleting" (count delete-docs) "with DB" db-name "and collection" collection
+                                       "with result:" (js->clj del-results))
+                        update-docs (:update diff)
+                        upd-results (when-not dry-run (<! (<updateSeq db-name collection update-docs :upsert false)))
+                        _ (timbre/info "Updated" (count update-docs) "with DB" db-name "and collection" collection
+                                       "with result:" (js->clj upd-results))]
+                    ;; TODO: updating cache to fit what we have right now
+                    (timbre/info "Trying to dissoc" path "from DB")
+                    [(if dry-run db (dissoc-in db path))
+                     (if dry-run db enhanced-db)])
+            (do (timbre/error "Trying to save with invalid sync layer:" layer)
+                [db enhanced-db]))))
+      db-chan)))
 
 (defn make-string
   "Turn a single keyword into a string and a sequence of keywords into strings"
@@ -259,38 +262,41 @@
 (defn <sync-load-layer
   "Load data from MongoDB according to sync layer, adding on Reframe DB we get from channel"
   [sync-info db-chan layer-index]
-  (go
-    (let [layer (nth (:layers sync-info) layer-index)
-          db (<! db-chan)
-          collection (:collection layer)
-          db-name (or (:db layer) (:db sync-info))
-          path (utils/stringify (:path layer))
-          path-key (utils/stringify (:path-key layer))
-          _ (timbre/info "<sync-load-layer about to load layer" layer "with path" path)
-          db'
-          (case (:kind layer)
-            :single (let [obj (<! (<findOne db-name collection (:keys layer) :fields (:fields layer)))
-                          [db' cache]
-                          (cond
-                            (false? obj) (do (timbre/warn "<sync-load-layer could not find any" collection)
-                                             [db []])
-                            ;; If we have an empty path, we replace the whole Reframe DB
-                            (empty? path) [obj [obj]]
-                            :else [(assoc-in db path obj) [obj]])]
-                      (update-layer-cache sync-info layer-index cache)
+  ;; We support nil layers, which are simply discarded
+  (if-let [layer (nth (:layers sync-info) layer-index)]
+    (go
+      (let [db (<! db-chan)
+            collection (:collection layer)
+            db-name (or (:db layer) (:db sync-info))
+            path (utils/stringify (:path layer))
+            path-key (utils/stringify (:path-key layer))
+            _ (timbre/info "<sync-load-layer about to load layer" layer "with path" path)
+            db'
+            (case (:kind layer)
+              :single (let [obj (<! (<findOne db-name collection (:keys layer) :fields (:fields layer)))
+                            [db' cache]
+                            (cond
+                              (false? obj) (do (timbre/warn "<sync-load-layer could not find any" collection)
+                                               [db []])
+                              ;; If we have an empty path, we replace the whole Reframe DB
+                              (empty? path) [obj [obj]]
+                              :else [(assoc-in db path obj) [obj]])]
+                        (update-layer-cache sync-info layer-index cache)
+                        db')
+              :many (let [items (<! (<find db-name collection (:keys layer) :fields (:fields layer)))
+                          _ (timbre/info "<sync-load-layer got" (count items) "items from collection" collection
+                                         "using path key" path-key "and path" path)
+                          ;; We have to fit the items into the Reframe DB, either as is, or as a map
+                          path-value (if path-key (into {} (map (fn [item] [(get item path-key) item]) items))
+                                                  items)
+                          _ (timbre/info "Keys are " (when (map? path-value) (keys path-value)))
+                          db' (assoc-in db path path-value)]
+                      (update-layer-cache sync-info layer-index items)
                       db')
-            :many (let [items (<! (<find db-name collection (:keys layer) :fields (:fields layer)))
-                        _ (timbre/info "<sync-load-layer got" (count items) "items from collection" collection
-                                       "using path key" path-key "and path" path)
-                        ;; We have to fit the items into the Reframe DB, either as is, or as a map
-                        path-value (if path-key (into {} (map (fn [item] [(get item path-key) item]) items))
-                                                items)
-                        _ (timbre/info "Keys are " (when (map? path-value) (keys path-value)))
-                        db' (assoc-in db path path-value)]
-                    (update-layer-cache sync-info layer-index items)
-                    db')
-            (do (timbre/error "Trying to load with invalid sync layer:" layer) db))]
-      db')))
+              (do (timbre/error "Trying to load with invalid sync layer:" layer) db))]
+        db'))
+    ;; We didn't have a proper layer, so just propagate the DB channel as is
+    db-chan))
 
 (defn <sync-save
   "Save a Reframe DB to MongoDB intelligently, returning the filtered (often empty) Reframe DB along with the enhanced DB"
