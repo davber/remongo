@@ -181,7 +181,7 @@
         opts {:upsert upsert}
         props  {:$set (clj->js doc')}]
     (go (-> (mongo-collection db-name coll-name)
-            (.updateOne (clj->js condition)
+            (.updateOne (clj->js (or condition {}))
                         (clj->js props)
                         (clj->js opts))
             (<p!) js->clj))))
@@ -190,7 +190,7 @@
   "Helper to update a sequence of documents"
   [db-name coll-name docs & {:keys [upsert] :or {upsert true}}]
   (go
-    (let [ch (async/map identity (map #(<updateOne db-name coll-name (if (get-id %) {:_id (get % "_id")} {}) % :upsert upsert) docs))
+    (let [ch (async/map identity (map #(<updateOne db-name coll-name (when-let [id (get-id %)] {:_id id}) % :upsert upsert) docs))
           coll (async/take (count docs) ch)]
       coll)))
 
