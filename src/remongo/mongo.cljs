@@ -12,6 +12,7 @@
 (def REALM-APP (atom nil))
 (def REALM-CRED (atom nil))
 (def REALM-MONGO-CLIENT (atom nil))
+(def ID-KEYS ["_id" "id" :_id :id])
 
 ;; The sync cache will map sync structure + layer index to a cache
 (def REALM-SYNC-CACHE (atom nil))
@@ -34,7 +35,7 @@
 (defn get-id
   "Get ID of the document, if any, as a string"
   [doc]
-  (when-let [id-obj (some (partial get doc) ["_id" "id" :_id :id])]
+  (when-let [id-obj (some (partial get doc) ID-KEYS)]
     (str id-obj)))
 
 (defn remove-id
@@ -239,7 +240,7 @@
                         ins-result (when-not dry-run (<! (<updateSeq db-name collection insert-docs :upsert true)))
                         _ (timbre/info "Inserted" (count insert-docs) "with DB" db-name "and collection" collection
                                        "with result"  (js->clj ins-result))
-                        delete-docs (:delete diff)
+                        delete-docs (when-not (:skip-load layer) (:delete diff))
                         _ (timbre/info "Trying to delete...")
                         del-results (when-not dry-run (<! (<deleteSeq db-name collection delete-docs)))
                         _ (timbre/info "Deleting" (count delete-docs) "with DB" db-name "and collection" collection
@@ -267,40 +268,42 @@
   "Load data from MongoDB according to sync layer, adding on Reframe DB we get from channel"
   [sync-info db-chan layer-index]
   ;; We support nil layers, which are simply discarded, as are layers where :load is false
-  (let [layer (nth (:layers sync-info) layer-index)]
-    (if (:skip-load layer)
-      db-chan
-      (go
-        (let [db (<! db-chan)
-              collection (:collection layer)
-              db-name (or (:db layer) (:db sync-info))
-              path (utils/stringify (:path layer))
-              path-key (utils/stringify (:path-key layer))
-              _ (timbre/info "<sync-load-layer about to load layer" layer "with path" path)
-              db'
-              (case (:kind layer)
-                :single (let [obj (<! (<findOne db-name collection (:keys layer) :fields (:fields layer)))
-                              [db' cache]
-                              (cond
-                                (false? obj) (do (timbre/warn "<sync-load-layer could not find any" collection)
-                                                 [db []])
+  (let [layer (nth (:layers sync-info) layer-index)
+        condition (:keys layer)
+        fields (if (:skip-load layer)
+                     (reduce #(assoc-in %1 [:projection %2] true) (:fields layer) ID-KEYS)
+                     (:fields layer))]
+    (go
+      (let [db (<! db-chan)
+            collection (:collection layer)
+            db-name (or (:db layer) (:db sync-info))
+            path (utils/stringify (:path layer))
+            path-key (utils/stringify (:path-key layer))
+            _ (timbre/info "<sync-load-layer about to load layer" layer "with path" path)
+            db'
+            (case (:kind layer)
+              :single (let [obj (<! (<findOne db-name collection condition :fields fields))
+                            [db' cache]
+                            (cond
+                              (false? obj) (do (timbre/warn "<sync-load-layer could not find any" collection)
+                                               [db []])
                                 ;; If we have an empty path, we replace the whole Reframe DB
-                                (empty? path) [obj [obj]]
-                                :else [(assoc-in db path obj) [obj]])]
-                          (update-layer-cache sync-info layer-index cache)
-                          db')
-                :many (let [items (<! (<find db-name collection (:keys layer) :fields (:fields layer)))
-                            _ (timbre/info "<sync-load-layer got" (count items) "items from collection" collection
-                                           "using path key" path-key "and path" path)
-                            ;; We have to fit the items into the Reframe DB, either as is, or as a map
-                            path-value (if path-key (into {} (map (fn [item] [(get item path-key) item]) items))
-                                                    items)
-                            _ (timbre/info "Keys are " (when (map? path-value) (keys path-value)))
-                            db' (assoc-in db path path-value)]
-                        (update-layer-cache sync-info layer-index items)
+                              (empty? path) [obj [obj]]
+                              :else [(assoc-in db path obj) [obj]])]
+                        (update-layer-cache sync-info layer-index cache)
                         db')
-                (do (timbre/error "Trying to load with invalid sync layer:" layer) db))]
-          db')))))
+              :many (let [items (<! (<find db-name collection condition :fields fields))
+                          _ (timbre/info "<sync-load-layer got" (count items) "items from collection" collection
+                                         "using path key" path-key "and path" path " items" items)
+                            ;; We have to fit the items into the Reframe DB, either as is, or as a map
+                          path-value (if path-key (into {} (map (fn [item] [(get item path-key) item]) items))
+                                         items)
+                          _ (timbre/info "Keys are " (when (map? path-value) (keys path-value)))
+                          db' (assoc-in db path path-value)]
+                      (update-layer-cache sync-info layer-index items)
+                      db')
+              (do (timbre/error "Trying to load with invalid sync layer:" layer) db))]
+        db'))))
 
 (defn <sync-save
   "Save a Reframe DB to MongoDB intelligently, returning the filtered (often empty) Reframe DB along with the enhanced DB"
