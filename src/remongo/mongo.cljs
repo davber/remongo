@@ -12,6 +12,7 @@
 (def REALM-APP (atom nil))
 (def REALM-CRED (atom nil))
 (def REALM-MONGO-CLIENT (atom nil))
+(def ID-KEYS [:_id :id "_id" "id"])
 
 ;; The sync cache will map sync structure + layer index to a cache
 (def REALM-SYNC-CACHE (atom nil))
@@ -33,9 +34,12 @@
 
 (defn get-id
   "Get ID of the document, if any, as a string"
-  [doc]
-  (when-let [id-obj (some (partial get doc) ["_id" "id" :_id :id])]
-    (str id-obj)))
+  [doc & {:keys [ensure-obj] :or {ensure-obj false}}]
+  (when-let [id-obj (some (partial get doc) ID-KEYS)]
+    (let [id-obj' (str id-obj)
+          id-obj'' (when ensure-obj (re-matches #"^[A-Fa-f\d]{24}$" id-obj'))
+          id-obj''' (if (and ensure-obj id-obj'') {"$oid" id-obj''} id-obj')]
+      id-obj''')))
 
 (defn remove-id
   "Remove ID from the document"
@@ -180,7 +184,7 @@
         opts {:upsert upsert}
         props  {:$set (clj->js doc')}]
     (go (-> (mongo-collection db-name coll-name)
-            (.updateOne (clj->js condition)
+            (.updateOne (clj->js (or condition {}))
                         (clj->js props)
                         (clj->js opts))
             (<p!) js->clj))))
@@ -189,7 +193,7 @@
   "Helper to update a sequence of documents"
   [db-name coll-name docs & {:keys [upsert] :or {upsert true}}]
   (go
-    (let [ch (async/map identity (map #(<updateOne db-name coll-name (if (get-id %) {:_id (get % "_id")} {}) % :upsert upsert) docs))
+    (let [ch (async/map identity (map #(<updateOne db-name coll-name (when (get-id %) {:_id (get-id % :ensure-obj true)}) % :upsert upsert) docs))
           coll (async/take (count docs) ch)]
       coll)))
 
