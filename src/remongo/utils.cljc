@@ -27,3 +27,7 @@
   [struct]
   (walk/prewalk stringify-keyword struct))
 
+(defn vconj
+  "Conj ensuring it is a vector first"
+  [coll item]
+  (conj (vec coll) item))
