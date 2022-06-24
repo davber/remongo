@@ -32,19 +32,36 @@
   [sync-info layer-index]
   (get-in @REALM-SYNC-CACHE [sync-info layer-index]))
 
+(defn id-to-str
+  "Create string from an ID object (or string)"
+  [id]
+  (str id))
+
+(defn id-to-obj
+  "Create ObjectID from ID object (or string), if possible"
+  [id]
+  (if (re-matches #"^[A-Fa-f\d]{24}$" id)
+    {"$oid" id}
+    id))
+
 (defn get-id
-  "Get ID of the document, if any, as a string"
+  "Get ID of the document, if any, as a string or object (if ensure-obj is true)"
   [doc & {:keys [ensure-obj] :or {ensure-obj false}}]
   (when-let [id-obj (some (partial get doc) ID-KEYS)]
-    (let [id-obj' (str id-obj)
-          id-obj'' (when ensure-obj (re-matches #"^[A-Fa-f\d]{24}$" id-obj'))
-          id-obj''' (if (and ensure-obj id-obj'') {"$oid" id-obj''} id-obj')]
-      id-obj''')))
+    (let [id-obj' ((if ensure-obj id-to-obj id-to-str) id-obj)]
+      id-obj')))
 
 (defn remove-id
   "Remove ID from the document"
   [doc]
-  (dissoc doc :_id :id "_id" "id"))
+  (apply dissoc doc ID-KEYS))
+
+(defn normalize-id
+  "Normalize id of given document, which is either to a string or object (if ensure-obj is true)"
+  [doc & {:keys [ensure-obj] :or {ensure-obj false}}]
+  (if-let [[k v] (some #(when-let [v (get doc %)] [% v]) ID-KEYS)]
+    (assoc doc k ((if ensure-obj id-to-obj id-to-str) v))
+    doc))
 
 (defn extract-layer-diff
   "Get the difference from the existing cache for a layer, as a three keyed structure, :insert, :update and :delete"
@@ -132,19 +149,41 @@
   [x]
   (or x false))
 
+(defn objectify-condition
+  "Objectify IDs mentioned in condition"
+  [condition]
+  (normalize-id condition :ensure-obj true))
+
+(defn objectify-fields
+  "Objectify IDs mentioned in fields, such as in projections"
+  [fields]
+  (if (:projections fields)
+    (update fields :projections #(normalize-id % :ensure-obj true))
+    fields))
+
 (defn <findOne
   "Find one MongoDB document, returning a channel to the result, with false being the value if not found"
   [db-name coll-name condition & {:keys [fields] :or {fields {}}}]
   ;; NOTE: we need to handle falsey values, and make sure it is indeed false, since
   ;; we can't put nil onto channels
-  (go (-> (mongo-collection db-name coll-name) (.findOne (clj->js (or condition {}))
-                                                         (clj->js (or fields {}))) (<p!) js->clj make-false)))
+  (go (-> (mongo-collection db-name coll-name)
+          (.findOne (clj->js (or (some-> condition objectify-condition) {}))
+                    (clj->js (or (some-> fields objectify-fields) {})))
+          (<p!)
+          js->clj
+          normalize-id
+          make-false)))
 
 (defn <find
   "Find many MongoDB documents for given collection name and condition, returning a channel holding sequence"
   [db-name coll-name condition & {:keys [fields] :or {fields {}}}]
-  (go (-> (mongo-collection db-name coll-name) (.find (clj->js (or condition {}))
-                                                      (clj->js (or fields {}))) (<p!) js->clj make-false)))
+  (go (->> (.find (mongo-collection db-name coll-name)
+                  (clj->js (or (some-> condition objectify-condition) {}))
+                  (clj->js (or (some-> fields objectify-fields) {})))
+          (<p!)
+          js->clj
+          (map normalize-id)
+          make-false)))
 
 (defn <insertMany
   "Insert many documents into a MongoDB collection, returning a channel of result"
@@ -173,7 +212,7 @@
 (defn <deleteMany
   "Delete many documents from a MongoDB collection, given a condition, returning result in channel"
   [db-name coll-name condition]
-  (go (-> (mongo-collection db-name coll-name) (.deleteMany (clj->js condition)) (<p!) js->clj)))
+  (go (-> (mongo-collection db-name coll-name) (.deleteMany (clj->js (objectify-condition condition))) (<p!) js->clj)))
 
 (defn <updateOne
   "Update one document in a MongoDB collection, given condition and options, returning result in channel"
@@ -184,7 +223,7 @@
         opts {:upsert upsert}
         props  {:$set (clj->js doc')}]
     (go (-> (mongo-collection db-name coll-name)
-            (.updateOne (clj->js (or condition {}))
+            (.updateOne (clj->js (or (some-> condition objectify-condition) {}))
                         (clj->js props)
                         (clj->js opts))
             (<p!) js->clj))))
@@ -193,7 +232,8 @@
   "Helper to update a sequence of documents"
   [db-name coll-name docs & {:keys [upsert] :or {upsert true}}]
   (go
-    (let [ch (async/map identity (map #(<updateOne db-name coll-name (when-let [id (get-id %)] {:_id id :ensure-obj true}) % :upsert upsert) docs))
+    (let [ch (async/map identity (map #(<updateOne db-name coll-name
+                                                   (when-let [id (get-id % :ensure-obj true)] {:_id id}) % :upsert upsert) docs))
           coll (async/take (count docs) ch)]
       coll)))
 
@@ -246,8 +286,8 @@
                         ;; inserting them.
                         ;; NOTE: we use updates with upsert being true, so we deal properly with things looking new
                         ;; but actually being old
-                        insert-docs-no-id (remove :_id insert-docs)
-                        insert-docs-with-id (filter :_id insert-docs)
+                        insert-docs-no-id (remove (set ID-KEYS) insert-docs)
+                        insert-docs-with-id (filter (set ID-KEYS) insert-docs)
                         ins-result (when-not (or (empty? insert-docs-with-id) dry-run) (<! (<updateSeq db-name collection insert-docs-with-id :upsert true)))
                         _ (timbre/info "Inserted" (count insert-docs-with-id) "with IDs, with DB" db-name "and collection" collection
                                        "with result"  (js->clj ins-result))
