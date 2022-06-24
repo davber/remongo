@@ -199,7 +199,7 @@
 (defn <delete
   "Delete one specific document"
   [db-name coll-name doc]
-  (go (-> (mongo-collection db-name coll-name) (.deleteOne (clj->js {"_id" (get doc "_id")})) (<p!) (js->clj))))
+  (go (-> (mongo-collection db-name coll-name) (.deleteOne (clj->js {"_id" (get-id doc :ensure-obj true)})) (<p!) (js->clj))))
 
 (defn <deleteSeq
   "Helper to delete a sequence of documents, returning sequence of results"
@@ -212,7 +212,7 @@
 (defn <deleteMany
   "Delete many documents from a MongoDB collection, given a condition, returning result in channel"
   [db-name coll-name condition]
-  (go (-> (mongo-collection db-name coll-name) (.deleteMany (clj->js (objectify-condition condition))) (<p!) js->clj)))
+  (go (-> (mongo-collection db-name coll-name) (.deleteMany (clj->js (objectify-condition (some-> condition objectify-condition)))) (<p!) js->clj)))
 
 (defn <updateOne
   "Update one document in a MongoDB collection, given condition and options, returning result in channel"
