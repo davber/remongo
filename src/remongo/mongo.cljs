@@ -7,7 +7,7 @@
     [cljs.core.async.interop :refer-macros [<p!]]
     [taoensso.timbre :as timbre]
     ["realm-web" :as realm]
-    [remongo.utils :as utils :refer [dissoc-in]]))
+    [remongo.utils :as utils :refer [dissoc-in vconj]]))
 
 (def REALM-APP (atom nil))
 (def REALM-CRED (atom nil))
@@ -207,27 +207,31 @@
       user)))
 
 (defn <sync-save-layer
-  "Use a sync layer to save extracts from Reframe DB to MongoDB, returning the reduced Reframe DB as well as the enhanced Reframe DB"
+  "Use a sync layer to save extracts from Reframe DB to MongoDB, returning the reduced Reframe DB as well as mapping from paths to IDs"
   [sync-info db-chan layer-index & {:keys [dry-run] :or {dry-run false}}]
   ;; We handle both nil layers and those that should not be saved naively
   (let [layer (nth (:layers sync-info) layer-index)]
     (if (:skip-save layer)
       db-chan
       (go
-        (let [path (utils/stringify (:path layer))
-              path-key (utils/stringify (:path-key layer))
-              [db enhanced-db] (<! db-chan)
+        (let [pure-path (:path layer)
+              path (utils/stringify pure-path)
+              pure-path-key (:path-key layer)
+              path-key (some-> pure-path-key utils/stringify)
+              [db id-map] (<! db-chan)
               collection (:collection layer)
-              ;; We first try with the the layer config, then the sync info as a whole, looking at db-save first
+              ;; We first try with the layer config, then the sync info as a whole, looking at db-save first
               db-name (or (:db-save layer) (:db layer)
-                          (:db-save sync-info) (:db sync-info))]
+                          (:db-save sync-info) (:db sync-info))
+              _ (timbre/info "<sync-save-layer with layer" layer "and path" path "and path-key" path-key)
+              ret
           ;; TODO: actually enhance the DB rather than just passing the same one around...
-          (timbre/info "<sync-save-layer with layer" layer "and path" path "and path-key" path-key)
           (case (:kind layer)
             ;; TODO: we should check the global for actual changes, using our sync cache
             :single (let [_res (when-not dry-run (<! (<updateOne db-name collection (:keys layer) db)))]
+                      ;; TODO: check if this single document got a [new] ID
                       [(if dry-run db (dissoc-in db path))
-                       (if dry-run db enhanced-db)])
+                       id-map])
             :many (let [path-value (get-in db path)
                         path-key path-key
                         items (if path-key (vals path-value) path-value)
@@ -235,26 +239,44 @@
                         ;; We just do the proper deletes, insertions and updates
                         diff (extract-layer-diff sync-info layer-index items)
                         insert-docs (:insert diff)
+                        ;; We divide the inserts into those with ID and those without, and use different means of
+                        ;; inserting them.
                         ;; NOTE: we use updates with upsert being true, so we deal properly with things looking new
-                        ;; but actuall being old
-                        ins-result (when-not dry-run (<! (<updateSeq db-name collection insert-docs :upsert true)))
-                        _ (timbre/info "Inserted" (count insert-docs) "with DB" db-name "and collection" collection
+                        ;; but actually being old
+                        insert-docs-no-id (remove :_id insert-docs)
+                        insert-docs-with-id (filter :_id insert-docs)
+                        ins-result (when-not (or (empty? insert-docs-with-id) dry-run) (<! (<updateSeq db-name collection insert-docs-with-id :upsert true)))
+                        _ (timbre/info "Inserted" (count insert-docs-with-id) "with IDs, with DB" db-name "and collection" collection
                                        "with result"  (js->clj ins-result))
+                        ins-result' (when-not (or (empty? insert-docs-no-id) dry-run) (<! (<insertMany db-name collection insert-docs-no-id)))
+                        _ (timbre/info "Inserted" (count insert-docs-no-id) "without IDs, with DB" db-name "and collection" collection
+                                       "with result"  (js->clj ins-result'))
+                        inserted-ids (map str (get ins-result' "insertedIds"))
+                        inserted-docs' (map #(assoc %2 :_id %1) inserted-ids insert-docs-no-id)
+                        ;; TODO: make sure adding IDs work even with sequences, instead of just maps
+                        id-map' (if pure-path-key (into id-map (map (juxt #(vconj pure-path (get % path-key)) get-id)
+                                                                    inserted-docs')) id-map)
+                        ;; Mapping old docs (without ID) to new ones (with ID), and then updating items in cache
+                        inserted-map (into {} (map vector insert-docs-no-id inserted-docs'))
+                        new-items (when-not (empty? inserted-docs') (map (some-fn inserted-map identity) items))
+                        _ (when-not (empty? inserted-docs') (update-layer-cache sync-info layer-index new-items))
+                        ;; We do not try to delete documents when we skip loading
                         delete-docs (when-not (:skip-load layer) (:delete diff))
-                        _ (timbre/info "Trying to delete...")
-                        del-results (when-not dry-run (<! (<deleteSeq db-name collection delete-docs)))
+                        del-results (when-not (or dry-run (empty? delete-docs)) (<! (<deleteSeq db-name collection delete-docs)))
                         _ (timbre/info "Deleting" (count delete-docs) "with DB" db-name "and collection" collection
                                        "with result:" (js->clj del-results))
                         update-docs (:update diff)
-                        upd-results (when-not dry-run (<! (<updateSeq db-name collection update-docs :upsert false)))
+                        upd-results (when-not (or dry-run (empty? update-docs)) (<! (<updateSeq db-name collection update-docs :upsert false)))
                         _ (timbre/info "Updated" (count update-docs) "with DB" db-name "and collection" collection
                                        "with result:" (js->clj upd-results))]
                     ;; TODO: updating cache to fit what we have right now
                     (timbre/info "Trying to dissoc" path "from DB")
                     [(if dry-run db (dissoc-in db path))
-                     (if dry-run db enhanced-db)])
+                     id-map'])
             (do (timbre/error "Trying to save with invalid sync layer:" layer)
-                [db enhanced-db])))))))
+                [db id-map]))]
+          (timbre/info "<sync-save-layer done")
+          ret)))))
 
 (defn make-string
   "Turn a single keyword into a string and a sequence of keywords into strings"
@@ -303,6 +325,7 @@
                       (update-layer-cache sync-info layer-index items)
                       db')
               (do (timbre/error "Trying to load with invalid sync layer:" layer) db))]
+        (timbre/info "<sync-load-layer completed")
         db'))))
 
 (defn <sync-save
@@ -311,8 +334,8 @@
   (let [ch (async/chan)
         layer-indices (range (count (:layers opts)))
         db' (utils/stringify db)]
-    ;; We push both the DB to be reduced and to be enchaned to the channel
-    (async/put! ch [db' db'])
+    ;; We push both the DB to be reduced and to be enhanced to the channel
+    (async/put! ch [db' {}])
     (reduce #(<sync-save-layer opts %1 %2 :dry-run dry-run) ch (reverse layer-indices))))
 
 (defn <sync-load
@@ -338,6 +361,6 @@
           user (current-user)
           fun (path-function fun-path user)
           _ (timbre/debug "fun is " fun)
-          promise (apply fun args)
-          ret (<p! promise)]
+          prom (apply fun args)
+          ret (<p! prom)]
          ret)))
