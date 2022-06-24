@@ -286,14 +286,14 @@
                         ;; inserting them.
                         ;; NOTE: we use updates with upsert being true, so we deal properly with things looking new
                         ;; but actually being old
-                        insert-docs-no-id (remove #(some (partial get %) ID-KEYS) insert-docs)
-                        insert-docs-with-id (filter #(some (partial get %) ID-KEYS) insert-docs)
+                        insert-docs-no-id (remove get-id insert-docs)
+                        insert-docs-with-id (filter get-id insert-docs)
                         ins-result (when-not (or (empty? insert-docs-with-id) dry-run) (<! (<updateSeq db-name collection insert-docs-with-id :upsert true)))
                         _ (timbre/info "Inserted" (count insert-docs-with-id) "with IDs, with DB" db-name "and collection" collection
                                        "with result"  (js->clj ins-result))
                         ins-result' (when-not (or (empty? insert-docs-no-id) dry-run) (<! (<insertMany db-name collection insert-docs-no-id)))
                         _ (timbre/info "Inserted" (count insert-docs-no-id) "without IDs, with DB" db-name "and collection" collection
-                                       "with result"  (js->clj ins-result') " and dosc ")
+                                       "with result"  (js->clj ins-result'))
                         inserted-ids (map str (get ins-result' "insertedIds"))
                         inserted-docs' (map #(assoc %2 :_id %1) inserted-ids insert-docs-no-id)
                         ;; TODO: make sure adding IDs work even with sequences, instead of just maps
