@@ -107,22 +107,26 @@
   (.-currentUser ^realm/App @REALM-APP))
 
 (defn <login
-  "Login using default user, returning a channel returning either an ID or nil"
-  []
+  "Login using either anonymous user or JWT, returning a channel returning either user object or false"
+  [& {:keys [jwt]}]
   (timbre/info "About to get credentials")
   (let [^realm/App app @REALM-APP
-        cred (.anonymous realm/Credentials)
+        cred (cond
+               jwt (.jwt realm/Credentials jwt)
+               :else (.anonymous realm/Credentials))
         cred' (utils/string-object cred)]
     (timbre/info "Got credentials:" cred')
     (reset! REALM-CRED cred)
     (timbre/info "About to login")
     (go
       (try
-        (let [user (<p! (.logIn app cred))]
-          (timbre/info "Logged in with user " user " and ID: " (.-id (current-user)))
+        (let [user (<p! (.logIn app cred))
+              user-clj (js->clj user)]
+          (timbre/info "Logged in with user " user-clj " and ID: " (.-id (current-user)))
           user)
         (catch js/Error err
-          (timbre/error "Login error: " err))))))
+          (timbre/error "Login error: " err)
+          false)))))
 
 (defn init-app
   "Initialize the Realm app"
@@ -238,11 +242,11 @@
       coll)))
 
 (defn <init
-  "Initialize the Realm connection, returning a channel with either user or nil"
-  [app-id app-variant]
+  "Initialize the Realm connection and logging in, returning a channel with either user or nil"
+  [app-id app-variant & {:keys [jwt]}]
   (init-app app-id)
   (go
-    (let [^realm/User user (<! (<login))
+    (let [^realm/User user (<! (<login :jwt jwt))
           _ (timbre/info "Getting user from channel: " user " with ID " (when user (.-id user)))
           ^realm/MongoDB client (.mongoClient user app-variant)]
       (timbre/info "Got MongoDB client: " client)
