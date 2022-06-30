@@ -275,10 +275,16 @@
           ;; TODO: actually enhance the DB rather than just passing the same one around...
           (case (:kind layer)
             ;; TODO: we should check the global for actual changes, using our sync cache
-            :single (let [_res (when-not dry-run (<! (<updateOne db-name collection (:keys layer) db)))]
+            :single (let [res (when-not dry-run (<! (<updateOne db-name collection (:keys layer) db)))
+                          res-clj (js->clj res :keywordize-keys true)
+                          upsertedId (some-> res-clj :upsertedId str)
+                          ;; TODO: will it really work to assign teh whole base DB to this ID?
+                          id-map' (if upsertedId (assoc id-map [] upsertedId) id-map)]
+                      (timbre/debug "Single update with upsertedId" upsertedId "and res-clj" res-clj "and id-map'"
+                                    id-map')
                       ;; TODO: check if this single document got a [new] ID
                       [(if dry-run db (dissoc-in db path))
-                       id-map])
+                       id-map'])
             :many (let [path-value (get-in db path)
                         path-key path-key
                         items (if path-key (vals path-value) path-value)
