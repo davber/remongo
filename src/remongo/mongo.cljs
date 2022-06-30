@@ -179,7 +179,7 @@
           make-false)))
 
 (defn <find
-  "Find many MongoDB documents for given collection name and condition, returning a channel holding sequence"
+  "Find many MongoDB documents for given collection name and condition, returning a channel holding a vector"
   [db-name coll-name condition & {:keys [fields] :or {fields {}}}]
   (go (->> (.find (mongo-collection db-name coll-name)
                   (clj->js (or (some-> condition objectify-condition) {}))
@@ -187,6 +187,7 @@
           (<p!)
           js->clj
           (map normalize-id)
+          vec
           make-false)))
 
 (defn <insertMany
@@ -292,24 +293,31 @@
                         ;; We just do the proper deletes, insertions and updates
                         diff (extract-layer-diff sync-info layer-index items)
                         insert-docs (:insert diff)
+                        ;; In order to find our way back to proper index, we need to index relative all items
+                        item-index (into {} (map-indexed (fn [index doc] [doc index]) items))
                         ;; We divide the inserts into those with ID and those without, and use different means of
                         ;; inserting them.
                         ;; NOTE: we use updates with upsert being true, so we deal properly with things looking new
                         ;; but actually being old
                         insert-docs-no-id (remove get-id insert-docs)
                         insert-docs-with-id (filter get-id insert-docs)
-                        ins-result (when-not (or (empty? insert-docs-with-id) dry-run) (<! (<updateSeq db-name collection insert-docs-with-id :upsert true)))
+                        ins-result (when-not (or (empty? insert-docs-with-id) dry-run)
+                                     (<! (<updateSeq db-name collection insert-docs-with-id
+                                                     :upsert true)))
                         _ (timbre/info "Inserted" (count insert-docs-with-id) "with IDs, with DB" db-name "and collection" collection
                                        "with result"  (js->clj ins-result))
-                        ins-result' (when-not (or (empty? insert-docs-no-id) dry-run) (<! (<insertMany db-name collection insert-docs-no-id)))
+                        ins-result' (when-not (or (empty? insert-docs-no-id) dry-run)
+                                      (<! (<insertMany db-name collection insert-docs-no-id)))
                         _ (timbre/info "Inserted" (count insert-docs-no-id) "without IDs, with DB" db-name "and collection" collection
                                        "with result"  (js->clj ins-result'))
                         inserted-ids (map str (get ins-result' "insertedIds"))
                         inserted-docs' (map #(assoc %2 :_id %1) inserted-ids insert-docs-no-id)
-                        ;; TODO: make sure adding IDs work even with sequences, instead of just maps
-                        id-map' (if pure-path-key (into id-map (map (juxt #(vconj pure-path (get % path-key)) get-id)
-                                                                    inserted-docs')) id-map)
+                        doc-key-fn (if pure-path-key #(get % path-key) (comp item-index #(dissoc % :_id)))
+                        id-map' (into id-map (map (juxt #(vconj pure-path (doc-key-fn %)) get-id)
+                                                  inserted-docs'))
+                        _ (timbre/debug "id-map is" id-map "and id-map' is" id-map')
                         ;; Mapping old docs (without ID) to new ones (with ID), and then updating items in cache
+                        ;; TODO: we should use id-map' here instead of mapping whole documents to IDd ones
                         inserted-map (into {} (map vector insert-docs-no-id inserted-docs'))
                         new-items (when-not (empty? inserted-docs') (map (some-fn inserted-map identity) items))
                         _ (when-not (empty? inserted-docs') (update-layer-cache sync-info layer-index new-items))
