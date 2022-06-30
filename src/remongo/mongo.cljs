@@ -170,13 +170,18 @@
   [db-name coll-name condition & {:keys [fields] :or {fields {}}}]
   ;; NOTE: we need to handle falsey values, and make sure it is indeed false, since
   ;; we can't put nil onto channels
-  (go (-> (mongo-collection db-name coll-name)
-          (.findOne (clj->js (or (some-> condition objectify-condition) {}))
-                    (clj->js (or (some-> fields objectify-fields) {})))
-          (<p!)
-          js->clj
-          normalize-id
-          make-false)))
+  (go
+    (let [res (some->
+                (mongo-collection db-name coll-name)
+                (.findOne (clj->js (or (some-> condition objectify-condition) {}))
+                          (clj->js (or (some-> fields objectify-fields) {})))
+                (<p!)
+                js->clj)
+          _ (timbre/debug "<findOne for res for collection" coll-name "and condition" condition
+                          ": " res)
+          norm-res (normalize-id res)]
+      (timbre/debug "<findOne got norm-res" norm-res)
+      (make-false norm-res))))
 
 (defn <find
   "Find many MongoDB documents for given collection name and condition, returning a channel holding a vector"
