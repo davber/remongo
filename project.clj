@@ -1,4 +1,4 @@
-(defproject org.clojars.davber/remongo "0.2.18"
+(defproject org.clojars.davber/remongo "0.2.19"
   :description "ClojureScript library synchronizing Re-frame DB's and MongoDB via Realm"
   :url "https://clojars.org/org.clojars.davber/remongo"
   :license {:name "Unlicense"

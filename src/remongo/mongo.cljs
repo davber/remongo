@@ -25,7 +25,8 @@
 (defn update-layer-cache
   "Update sync cache specific for the given layer"
   [sync-info layer-index data]
-  (swap! REALM-SYNC-CACHE assoc-in [sync-info layer-index] data))
+  (let [data' (utils/stringify data)]
+    (swap! REALM-SYNC-CACHE assoc-in [sync-info layer-index] data')))
 
 (defn get-layer-cache
   "Get the layer cache"
@@ -89,7 +90,12 @@
         new-docs (filter (comp surviving-ids get-id) data)
         old-docs (filter (comp surviving-ids get-id) old-data)
         old-map (into {} (map (juxt get-id identity) old-docs))
-        updated-docs (remove (fn [doc] (let [old-doc (old-map (get-id doc))] (= (remove-id doc) (remove-id old-doc)))) new-docs)
+        updated-docs (remove (fn [doc] (let [old-doc (old-map (get-id doc))
+                                             same (= (remove-id doc) (remove-id old-doc))]
+                                         (timbre/debug "Matching old document:" old-doc)
+                                         (timbre/debug "Matching new document:" doc)
+                                         (timbre/debug "Matching are the same:" same)
+                                         same)) new-docs)
         updated-docs' (map #(update % "_id" old-ids-objects) updated-docs)
         updated-ids (map get-id updated-docs)
         diff {:insert inserted-docs' :delete deleted-docs :update updated-docs'}]
@@ -300,6 +306,11 @@
                         insert-docs (:insert diff)
                         ;; In order to find our way back to proper index, we need to index relative all items
                         item-index (into {} (map-indexed (fn [index doc] [doc index]) items))
+
+                        ;;
+                        ;; Inserts of new documents
+                        ;;
+
                         ;; We divide the inserts into those with ID and those without, and use different means of
                         ;; inserting them.
                         ;; NOTE: we use updates with upsert being true, so we deal properly with things looking new
@@ -326,18 +337,28 @@
                         inserted-map (into {} (map vector insert-docs-no-id inserted-docs'))
                         new-items (when-not (empty? inserted-docs') (map (some-fn inserted-map identity) items))
                         _ (when-not (empty? inserted-docs') (update-layer-cache sync-info layer-index new-items))
+
+                        ;;
+                        ;; Deletion of old documents now removed
+                        ;;
+
                         ;; We do not try to delete documents when we skip loading
                         delete-docs (when-not (:skip-load layer) (:delete diff))
                         del-results (when-not (or dry-run (empty? delete-docs)) (<! (<deleteSeq db-name collection delete-docs)))
                         _ (timbre/info "Deleting" (count delete-docs) "with DB" db-name "and collection" collection
                                        "with result:" (js->clj del-results))
+
+                        ;;
+                        ;; Updates of modified documents
+                        ;;
+
                         update-docs (:update diff)
                         upd-results (when-not (or dry-run (empty? update-docs)) (<! (<updateSeq db-name collection update-docs :upsert false)))
                         _ (timbre/info "Updated" (count update-docs) "with DB" db-name "and collection" collection
                                        "with result:" (js->clj upd-results))]
                     ;; TODO: updating cache to fit what we have right now
                     (timbre/info "Trying to dissoc" path "from DB")
-                    [(if dry-run db (dissoc-in db path))
+                    [(dissoc-in db path)
                      id-map'])
             (do (timbre/error "Trying to save with invalid sync layer:" layer)
                 [db id-map]))]
