@@ -7,12 +7,11 @@
     [cljs.core.async.interop :refer-macros [<p!]]
     [taoensso.timbre :as timbre]
     ["realm-web" :as realm]
-    [remongo.utils :as utils :refer [dissoc-in vconj]]))
+    [remongo.collection :as c]
+    [remongo.utils :as utils :refer [dissoc-in vconj get-id remove-id]]))
 
 (def REALM-APP (atom nil))
 (def REALM-CRED (atom nil))
-(def REALM-MONGO-CLIENT (atom nil))
-(def ID-KEYS [:_id :id "_id" "id"])
 
 ;; The sync cache will map sync structure + layer index to a cache
 (def REALM-SYNC-CACHE (atom nil))
@@ -32,37 +31,6 @@
   "Get the layer cache"
   [sync-info layer-index]
   (get-in @REALM-SYNC-CACHE [sync-info layer-index]))
-
-(defn id-to-str
-  "Create string from an ID object (or string)"
-  [id]
-  (str id))
-
-(defn id-to-obj
-  "Create ObjectID from ID object (or string), if possible"
-  [id]
-  (if (and (string? id) (re-matches #"^[A-Fa-f\d]{24}$" id))
-    {"$oid" id}
-    id))
-
-(defn get-id
-  "Get ID of the document, if any, as a string or object (if ensure-obj is true)"
-  [doc & {:keys [ensure-obj] :or {ensure-obj false}}]
-  (when-let [id-obj (some (partial get doc) ID-KEYS)]
-    (let [id-obj' ((if ensure-obj id-to-obj id-to-str) id-obj)]
-      id-obj')))
-
-(defn remove-id
-  "Remove ID from the document"
-  [doc]
-  (apply dissoc doc ID-KEYS))
-
-(defn normalize-id
-  "Normalize id of given document, which is either to a string or object (if ensure-obj is true)"
-  [doc & {:keys [ensure-obj] :or {ensure-obj false}}]
-  (if-let [[k v] (some #(when-let [v (get doc %)] [% v]) ID-KEYS)]
-    (assoc doc k ((if ensure-obj id-to-obj id-to-str) v))
-    doc))
 
 (defn extract-layer-diff
   "Get the difference from the existing cache for a layer, as a three keyed structure, :insert, :update and :delete"
@@ -144,115 +112,6 @@
     (timbre/info "Created Realm app: " app')
     (reset! REALM-APP app)))
 
-;; Neeed to turn off inference temporarily, due to the 'mongoClient' not being found
-(set! *warn-on-infer* false)
-
-(defn mongo-collection
-  "Get the MongoDB collection for the given name"
-  [^js/String db-name ^js/String coll-name]
-  (-> @REALM-MONGO-CLIENT
-      (.db db-name)
-      (.collection coll-name)))
-
-(defn- make-false
-  "Make anything falsey into false"
-  [x]
-  (or x false))
-
-(defn objectify-condition
-  "Objectify IDs mentioned in condition"
-  [condition]
-  (normalize-id condition :ensure-obj true))
-
-(defn objectify-fields
-  "Objectify IDs mentioned in fields, such as in projections"
-  [fields]
-  (if (:projections fields)
-    (update fields :projections #(normalize-id % :ensure-obj true))
-    fields))
-
-(defn <findOne
-  "Find one MongoDB document, returning a channel to the result, with false being the value if not found"
-  [db-name coll-name condition & {:keys [fields] :or {fields {}}}]
-  ;; NOTE: we need to handle falsey values, and make sure it is indeed false, since
-  ;; we can't put nil onto channels
-  (go
-    (let [res (some->
-                (mongo-collection db-name coll-name)
-                (.findOne (clj->js (or (some-> condition objectify-condition) {}))
-                          (clj->js (or (some-> fields objectify-fields) {})))
-                (<p!)
-                js->clj)
-          _ (timbre/debug "<findOne for res for collection" coll-name "and condition" condition
-                          ": " res)
-          norm-res (normalize-id res)]
-      (timbre/debug "<findOne got norm-res" norm-res)
-      (make-false norm-res))))
-
-(defn <find
-  "Find many MongoDB documents for given collection name and condition, returning a channel holding a vector"
-  [db-name coll-name condition & {:keys [fields] :or {fields {}}}]
-  (go (->> (.find (mongo-collection db-name coll-name)
-                  (clj->js (or (some-> condition objectify-condition) {}))
-                  (clj->js (or (some-> fields objectify-fields) {})))
-          (<p!)
-          js->clj
-          (map normalize-id)
-          vec
-          make-false)))
-
-(defn <insertMany
-  "Insert many documents into a MongoDB collection, returning a channel of result"
-  [db-name coll-name docs]
-  (go
-    ;; Realm Web SDK doesn't deal with insertion of empty collections
-    (if (empty? docs)
-      (do
-        (timbre/warn "Trying to insert empty sequence into collection" coll-name)
-        true)
-      (-> (mongo-collection db-name coll-name) (.insertMany (clj->js docs)) (<p!) js->clj))))
-
-(defn <delete
-  "Delete one specific document"
-  [db-name coll-name doc]
-  (go (-> (mongo-collection db-name coll-name) (.deleteOne (clj->js {"_id" (get-id doc :ensure-obj true)})) (<p!) (js->clj))))
-
-(defn <deleteSeq
-  "Helper to delete a sequence of documents, returning sequence of results"
-  [db-name coll-name docs]
-  (go
-    (let [ch (async/map identity (map (partial <delete db-name coll-name) docs))
-          coll (async/take (count docs) ch)]
-      coll)))
-
-(defn <deleteMany
-  "Delete many documents from a MongoDB collection, given a condition, returning result in channel"
-  [db-name coll-name condition]
-  (go (-> (mongo-collection db-name coll-name) (.deleteMany (clj->js (objectify-condition (some-> condition objectify-condition)))) (<p!) js->clj)))
-
-(defn <updateOne
-  "Update one document in a MongoDB collection, given condition and options, returning result in channel"
-  [db-name coll-name condition doc & {:keys [upsert] :or {upsert true}}]
-  ;; NOTE: we remove the _id from the actual object, even if it did exist before
-  ;; TODO: we should really only do this if the condition involves the ID
-  (let [doc' (dissoc doc "_id")
-        opts {:upsert upsert}
-        props  {:$set (clj->js doc')}]
-    (go (-> (mongo-collection db-name coll-name)
-            (.updateOne (clj->js (or (some-> condition objectify-condition) {}))
-                        (clj->js props)
-                        (clj->js opts))
-            (<p!) js->clj))))
-
-(defn <updateSeq
-  "Helper to update a sequence of documents"
-  [db-name coll-name docs & {:keys [upsert] :or {upsert true}}]
-  (go
-    (let [ch (async/map identity (map #(<updateOne db-name coll-name
-                                                   (when-let [id (get-id % :ensure-obj true)] {:_id id}) % :upsert upsert) docs))
-          coll (async/take (count docs) ch)]
-      coll)))
-
 (defn <init
   "Initialize the Realm connection and logging in, returning a channel with either user or nil"
   [app-id app-variant & {:keys [jwt]}]
@@ -262,7 +121,7 @@
           _ (timbre/info "Getting user from channel: " user " with ID " (when user (.-id user)))
           ^realm/MongoDB client (.mongoClient user app-variant)]
       (timbre/info "Got MongoDB client: " client)
-      (reset! REALM-MONGO-CLIENT client)
+      (reset! c/REALM-MONGO-CLIENT client)
       user)))
 
 (defn <sync-save-layer
@@ -278,16 +137,17 @@
               pure-path-key (:path-key layer)
               path-key (some-> pure-path-key utils/stringify)
               [db id-map] (<! db-chan)
-              collection (:collection layer)
+              collection-name (:collection layer)
               ;; We first try with the layer config, then the sync info as a whole, looking at db-save first
               db-name (or (:db-save layer) (:db layer)
                           (:db-save sync-info) (:db sync-info))
+              collection (c/make-collection db-name collection-name)
               _ (timbre/info "<sync-save-layer with layer" layer "and path" path "and path-key" path-key)
               ret
           ;; TODO: actually enhance the DB rather than just passing the same one around...
           (case (:kind layer)
             ;; TODO: we should check the global for actual changes, using our sync cache
-            :single (let [res (when-not dry-run (<! (<updateOne db-name collection (:keys layer) db)))
+            :single (let [res (when-not dry-run (<! (c/<updateOne collection (:keys layer) db)))
                           res-clj (js->clj res :keywordize-keys true)
                           upsertedId (some-> res-clj :upsertedId str)
                           ;; TODO: will it really work to assign teh whole base DB to this ID?
@@ -300,7 +160,7 @@
             :many (let [path-value (get-in db path)
                         path-key path-key
                         items (if path-key (vals path-value) path-value)
-                        _ (timbre/info "Got" (count items) "items for collection" collection)
+                        _ (timbre/info "Got" (count items) "items for collection" collection-name)
                         ;; We just do the proper deletes, insertions and updates
                         diff (extract-layer-diff sync-info layer-index items)
                         insert-docs (:insert diff)
@@ -318,12 +178,12 @@
                         insert-docs-no-id (remove get-id insert-docs)
                         insert-docs-with-id (filter get-id insert-docs)
                         ins-result (when-not (or (empty? insert-docs-with-id) dry-run)
-                                     (<! (<updateSeq db-name collection insert-docs-with-id
+                                     (<! (c/<updateSeq collection insert-docs-with-id
                                                      :upsert true)))
                         _ (timbre/info "Inserted" (count insert-docs-with-id) "with IDs, with DB" db-name "and collection" collection
                                        "with result"  (js->clj ins-result))
                         ins-result' (when-not (or (empty? insert-docs-no-id) dry-run)
-                                      (<! (<insertMany db-name collection insert-docs-no-id)))
+                                      (<! (c/<insertMany collection insert-docs-no-id)))
                         _ (timbre/info "Inserted" (count insert-docs-no-id) "without IDs, with DB" db-name "and collection" collection
                                        "with result"  (js->clj ins-result'))
                         inserted-ids (map str (get ins-result' "insertedIds"))
@@ -344,18 +204,18 @@
 
                         ;; We do not try to delete documents when we skip loading
                         delete-docs (when-not (:skip-load layer) (:delete diff))
-                        del-results (when-not (or dry-run (empty? delete-docs)) (<! (<deleteSeq db-name collection delete-docs)))
-                        _ (timbre/info "Deleting" (count delete-docs) "with DB" db-name "and collection" collection
-                                       "with result:" (js->clj del-results))
+                        del-results (when-not (or dry-run (empty? delete-docs)) (<! (c/<deleteSeq collection delete-docs)))
+                        _ (timbre/info "Deleting" (count delete-docs) "with DB" db-name "and collection"
+                                       collection-name "with result:" (js->clj del-results))
 
                         ;;
                         ;; Updates of modified documents
                         ;;
 
                         update-docs (:update diff)
-                        upd-results (when-not (or dry-run (empty? update-docs)) (<! (<updateSeq db-name collection update-docs :upsert false)))
-                        _ (timbre/info "Updated" (count update-docs) "with DB" db-name "and collection" collection
-                                       "with result:" (js->clj upd-results))]
+                        upd-results (when-not (or dry-run (empty? update-docs)) (<! (c/<updateSeq collection update-docs :upsert false)))
+                        _ (timbre/info "Updated" (count update-docs) "with DB" db-name "and collection"
+                                       collection-name "with result:" (js->clj upd-results))]
                     ;; TODO: updating cache to fit what we have right now
                     (timbre/info "Trying to dissoc" path "from DB")
                     [(dissoc-in db path)
@@ -382,25 +242,27 @@
       db-chan
       (go
         (let [db (<! db-chan)
-              collection (:collection layer)
+              collection-name (:collection layer)
               db-name (or (:db layer) (:db sync-info))
+              collection (c/make-collection db-name collection-name)
+
               path (utils/stringify (:path layer))
               path-key (utils/stringify (:path-key layer))
               _ (timbre/info "<sync-load-layer about to load layer" layer "with path" path)
               db'
               (case (:kind layer)
-                :single (let [obj (<! (<findOne db-name collection (:keys layer) :fields (:fields layer)))
+                :single (let [obj (<! (c/<findOne collection (:keys layer) :fields (:fields layer)))
                               [db' cache]
                               (cond
-                                (false? obj) (do (timbre/warn "<sync-load-layer could not find any" collection)
+                                (false? obj) (do (timbre/warn "<sync-load-layer could not find any" collection-name)
                                                  [db []])
                                 ;; If we have an empty path, we replace the whole Reframe DB
                                 (empty? path) [obj [obj]]
                                 :else [(assoc-in db path obj) [obj]])]
                           (update-layer-cache sync-info layer-index cache)
                           db')
-                :many (let [items (<! (<find db-name collection (:keys layer) :fields (:fields layer)))
-                            _ (timbre/info "<sync-load-layer got" (count items) "items from collection" collection
+                :many (let [items (<! (c/<find collection (:keys layer) :fields (:fields layer)))
+                            _ (timbre/info "<sync-load-layer got" (count items) "items from collection" collection-name
                                            "using path key" path-key "and path" path)
                             ;; We have to fit the items into the Reframe DB, either as is, or as a map
                             path-value (if path-key (into {} (map (fn [item] [(get item path-key) item]) items))
