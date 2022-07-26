@@ -80,6 +80,8 @@
   []
   (.-currentUser ^realm/App @REALM-APP))
 
+(set! *warn-on-infer* false)
+
 (defn <login
   "Login using either anonymous user or JWT, returning a channel returning either user object or false"
   [& {:keys [jwt]}]
@@ -310,3 +312,6 @@
           prom (apply fun args)
           ret (<p! prom)]
          ret)))
+
+
+(set! *warn-on-infer* true)
