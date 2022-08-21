@@ -6,12 +6,11 @@
     [cljs.core.async :as async :refer [go <!]]
     [cljs.core.async.interop :refer-macros [<p!]]
     [taoensso.timbre :as timbre]
-    ["realm-web" :as realm]
     [remongo.collection :as c]
     [remongo.utils :as utils :refer [dissoc-in vconj get-id remove-id]]))
 
-(def REALM-APP (atom nil))
-(def CREDENTIALS "The Credentials object for the Realm platform" (atom nil))
+(def REALM-APP "The Realm App" (atom nil))
+(def REALM-CREDENTIALS-CLASS "The class to use for Realm Credentials" (atom nil))
 (def REALM-CRED (atom nil))
 
 ;; The sync cache will map sync structure + layer index to a cache
@@ -89,8 +88,8 @@
   (timbre/info "About to get credentials")
   (let [app @REALM-APP
         cred (cond
-               jwt (.jwt @CREDENTIALS jwt)
-               :else (.anonymous @CREDENTIALS))
+               jwt (.jwt @REALM-CREDENTIALS-CLASS jwt)
+               :else (.anonymous @REALM-CREDENTIALS-CLASS))
         cred' (utils/string-object cred)]
     (timbre/info "Got credentials:" cred')
     (reset! REALM-CRED cred)
@@ -106,16 +105,16 @@
           false)))))
 
 (defn init-app
-  "Initialize the Realm app, by passing a proper Realm App instance along with the Credentials object"
-  [app credentials]
-  (timbre/info "Setting Realm app and credentials")
-  (reset! REALM-APP app)
-  (reset! CREDENTIALS credentials))
+  "Initialize the Realm app, by passing Realm App and Credentials classes"
+  [app-id app-class credentials-class]
+  (timbre/info "Setting Realm app ID, along with App and Credentials classes")
+  (reset! REALM-APP (new app-class (clj->js {:id app-id})))
+  (reset! REALM-CREDENTIALS-CLASS credentials-class))
 
 (defn <init
   "Initialize the Realm connection and logging in, returning a channel with either user or nil"
-  [app app-variant credentials & {:keys [jwt]}]
-  (init-app app credentials)
+  [app-id app-variant app-class credentials-class & {:keys [jwt]}]
+  (init-app app-id app-class credentials-class)
   (go
     (let [user (<! (<login :jwt jwt))
           _ (timbre/info "Getting user from channel: " user " with ID " (when user (.-id user)))
