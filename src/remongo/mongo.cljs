@@ -11,6 +11,7 @@
     [remongo.utils :as utils :refer [dissoc-in vconj get-id remove-id]]))
 
 (def REALM-APP (atom nil))
+(def CREDENTIALS "The Credentials object for the Realm platform" (atom nil))
 (def REALM-CRED (atom nil))
 
 ;; The sync cache will map sync structure + layer index to a cache
@@ -75,21 +76,21 @@
     (timbre/info "extract-layer-diff of layer" layer-index "with diff:\n" diff)
     diff))
 
-(defn ^realm/User current-user
+(set! *warn-on-infer* false)
+
+(defn current-user
   "The currently logged in user, if any"
   []
-  (.-currentUser ^realm/App @REALM-APP))
-
-(set! *warn-on-infer* false)
+  (.-currentUser @REALM-APP))
 
 (defn <login
   "Login using either anonymous user or JWT, returning a channel returning either user object or false"
   [& {:keys [jwt]}]
   (timbre/info "About to get credentials")
-  (let [^realm/App app @REALM-APP
+  (let [app @REALM-APP
         cred (cond
-               jwt (.jwt realm/Credentials jwt)
-               :else (.anonymous realm/Credentials))
+               jwt (.jwt @CREDENTIALS jwt)
+               :else (.anonymous @CREDENTIALS))
         cred' (utils/string-object cred)]
     (timbre/info "Got credentials:" cred')
     (reset! REALM-CRED cred)
@@ -105,23 +106,20 @@
           false)))))
 
 (defn init-app
-  "Initialize the Realm app"
-  [app-id]
-  ;; Create a Realm app proxy
-  (timbre/info "About to create Realm app")
-  (let [^realm/App app (realm/App. (clj->js {:id app-id}))
-        app' (utils/string-object app)]
-    (timbre/info "Created Realm app: " app')
-    (reset! REALM-APP app)))
+  "Initialize the Realm app, by passing a proper Realm App instance along with the Credentials object"
+  [app credentials]
+  (timbre/info "Setting Realm app and credentials")
+  (reset! REALM-APP app)
+  (reset! CREDENTIALS credentials))
 
 (defn <init
   "Initialize the Realm connection and logging in, returning a channel with either user or nil"
-  [app-id app-variant & {:keys [jwt]}]
-  (init-app app-id)
+  [app-id app-variant credentials & {:keys [jwt]}]
+  (init-app app-id credentials)
   (go
-    (let [^realm/User user (<! (<login :jwt jwt))
+    (let [user (<! (<login :jwt jwt))
           _ (timbre/info "Getting user from channel: " user " with ID " (when user (.-id user)))
-          ^realm/MongoDB client (.mongoClient user app-variant)]
+          client (.mongoClient user app-variant)]
       (timbre/info "Got MongoDB client: " client)
       (reset! c/REALM-MONGO-CLIENT client)
       user)))
@@ -305,7 +303,7 @@
   (go
     (let [fun-path (cons "functions" (string/split fun-path-str #"/"))
           _ (timbre/debug "fun-path is " fun-path)
-          ^realm/App app @REALM-APP
+          app @REALM-APP
           user (current-user)
           fun (path-function fun-path user)
           _ (timbre/debug "fun is " fun)
