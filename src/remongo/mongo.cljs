@@ -114,8 +114,8 @@
 
 (defn <init
   "Initialize the Realm connection and logging in, returning a channel with either user or nil"
-  [app-id app-variant credentials & {:keys [jwt]}]
-  (init-app app-id credentials)
+  [app app-variant credentials & {:keys [jwt]}]
+  (init-app app credentials)
   (go
     (let [user (<! (<login :jwt jwt))
           _ (timbre/info "Getting user from channel: " user " with ID " (when user (.-id user)))
